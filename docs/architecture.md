@@ -1,0 +1,89 @@
+# Architecture & AI Runtime notes
+
+## End-to-end flow
+
+```
+   synthetic data ──► AI Runtime GPU node (serverless)
+   (sklearn)          │
+                      │  01 single-GPU (A10)      02 multi-GPU (8×H100)
+                      │  device="cuda" hist       parallel HPO: 1 trial per GPU
+                      │        │                        │  pick best by AUC
+                      │        ▼                        ▼
+                      │  MLflow run (params, metrics, model + register)
+                      └────────┼───────────────────────────────────────
+                               ▼
+                Unity Catalog registered model
+                hiroshi.air_samples.xgboost_classification
+                               │
+                 03 GPU batch inference (AI Runtime GPU)
+                 → predictions to a UC table / Volume CSV
+```
+
+## Model & data
+
+- **XGBoost** — the mainstream gradient-boosted decision tree library for tabular data. On XGBoost
+  2.x, GPU training is selected with `tree_method="hist"` + `device="cuda"` (the old `gpu_hist`
+  tree method and `gpu_id` are deprecated).
+- **Synthetic classification** — `sklearn.datasets.make_classification` generates a large, balanced,
+  reproducible dataset (default 500k×100). No network/HuggingFace dependency, so the demo is fully
+  self-contained. Swap in your own UC table for a real workload.
+
+## The two GPU modes for XGBoost — and which this repo uses
+
+XGBoost has two distinct ways to use more than one GPU. They solve different problems:
+
+1. **Task-parallel — parallel hyperparameter search (this repo's `02`).** Independent models are
+   trained concurrently, **one trial per GPU**. XGBoost releases the GIL during `train`, so a plain
+   `ThreadPoolExecutor` (one worker per GPU, each with `device="cuda:<i>"`) runs the trials in true
+   parallel — no cluster framework. This is the most common real reason to point 8 GPUs at a
+   classic-ML job, and it runs on the **stock AI Runtime environment**. Validated: 8 trials across
+   `cuda:0…cuda:7` finished in ~5 s wall time (vs ~24 s summed) — clear parallel speedup.
+
+2. **Data-parallel — one model, data split across GPUs (`xgboost.dask` + Dask-CUDA).** Used only
+   when a dataset is **too large for one GPU's memory**. A single H100 has 80 GB and trains most
+   tabular data faster without the per-round AllReduce overhead, so this is a niche. **Note for AI
+   Runtime:** `dask_cuda.LocalCUDACluster` hangs at worker startup on the stock AIR environment; to
+   use it you need a **custom RAPIDS Docker image** (`air register image`). Multi-node scale-out for
+   XGBoost is typically done with the **Spark connector** (`xgboost.spark`) on a lakehouse instead.
+
+> Honesty for the customer: XGBoost multi-GPU is not "always on" like DL data parallelism. Default
+> to a single GPU; reach for parallel HPO to use many GPUs, or Dask/Spark data-parallel only when the
+> data genuinely exceeds one GPU.
+
+## Notebook + CLI dual-mode (no code changes)
+
+Each `src/*.py` carries Databricks notebook markers that are also valid Python comments
+(`# Databricks notebook source`, `# COMMAND ----------`, `# MAGIC %pip`/`%md`). Opened in the
+workspace they become real cells (the `%pip` cells install deps); run by the AI Runtime CLI the
+`# MAGIC` lines are inert and deps come from the workload YAML. A single
+`if __name__ == "__main__": main()` triggers execution in both. All config is environment variables
+with defaults. Neither `01`, `02` nor `03` needs `torchrun` — the parallel-HPO threads and the
+single-GPU trainer both run in one process.
+
+## AI Runtime operational notes (validated on e2-demo-field-eng)
+
+1. **Environment version 4 preinstalls** Python 3.12, torch 2.7.1+cu126, mlflow, scikit-learn, and
+   serverless_gpu. It does **not** include `xgboost` — the YAML/`%pip` add it (pinned `>=2.1,<3`).
+2. **Model logging + UC registration works with the standard API**:
+   `mlflow.xgboost.log_model(..., registered_model_name="hiroshi.air_samples.xgboost_classification")`
+   inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
+3. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
+   out of the code snapshot.
+4. **`air logs` may report "No logs available"** even for successful runs; on e2 `air run --watch`
+   streams execution logs live. For debugging, write to a UC Volume.
+5. **No Spark on AI Runtime GPU nodes** — batch inference (`03`) tries a Spark Delta write and falls
+   back to a CSV on a UC Volume (`/Volumes/hiroshi/air_samples/predictions/`).
+
+## Files
+
+| File | Role |
+|------|------|
+| `src/01_train_singlegpu.py` + `air/train_singlegpu.yaml` | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
+| `src/02_train_multigpu.py` + `air/train_multigpu.yaml` | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
+| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference from the UC model → UC table / Volume CSV |
+
+## References
+
+- [XGBoost GPU support (`device`)](https://xgboost.readthedocs.io/en/stable/gpu/index.html)
+- [XGBoost Dask (data-parallel)](https://xgboost.readthedocs.io/en/stable/python/dask.html)
+- [xgboost.spark (multi-node)](https://xgboost.readthedocs.io/en/stable/tutorials/spark_estimator.html)

@@ -1,0 +1,26 @@
+# AI Runtime CLI workload spec — XGBoost GPU batch inference.
+#
+# Requires a model already registered to Unity Catalog by 01 or 02.
+# Run it with:
+#   air run --file air/batch_inference.yaml --watch --profile DEFAULT
+
+experiment_name: xgboost-classification-batch-inference
+max_retries: 0
+
+environment:
+  # Version "4" preinstalls. We add xgboost and scikit-learn for data generation.
+  version: "4"
+  dependencies:
+    - "xgboost>=2.1,<3"
+    - "scikit-learn>=1.3,<2"
+
+compute:
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: python $CODE_SOURCE_PATH/src/03_batch_inference.py

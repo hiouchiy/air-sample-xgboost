@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+logs/
+*.log
+/tmp/
+.DS_Store
+mlruns/

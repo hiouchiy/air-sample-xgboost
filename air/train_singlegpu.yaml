@@ -1,0 +1,31 @@
+# AI Runtime CLI workload spec — XGBoost single-GPU training on synthetic classification.
+#
+# Run it with:
+#   air run --file air/train_singlegpu.yaml --watch --profile DEFAULT
+#
+# The referenced Python file (src/01_train_singlegpu.py) is the SAME file you can
+# open and Run All as a Databricks notebook — no code changes between the two modes.
+# Dependencies are declared here (not via %pip) so the shared script stays portable.
+
+experiment_name: xgboost-classification-singlegpu
+max_retries: 0
+
+environment:
+  # Version "4" ships Python 3.12, torch 2.7.1+cu126, mlflow, scikit-learn and
+  # serverless_gpu preinstalled. We add xgboost and scikit-learn. Versions are pinned
+  # to ensure compatibility and avoid resolver conflicts.
+  version: "4"
+  dependencies:
+    - "xgboost>=2.1,<3"
+    - "scikit-learn>=1.3,<2"
+
+compute:
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: python $CODE_SOURCE_PATH/src/01_train_singlegpu.py
