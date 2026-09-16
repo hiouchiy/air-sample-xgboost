@@ -1,7 +1,7 @@
 # AI Runtime CLI workload spec — XGBoost single-GPU training on synthetic classification.
 #
 # Run it with:
-#   air run --file air/train_singlegpu.yaml --watch --profile DEFAULT
+#   air run --file air/train_singlegpu.yaml --watch --profile <your-profile>
 #
 # The referenced Python file (src/01_train_singlegpu.py) is the SAME file you can
 # open and Run All as a Databricks notebook — no code changes between the two modes.

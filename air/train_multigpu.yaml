@@ -1,7 +1,7 @@
 # AI Runtime CLI workload spec — XGBoost multi-GPU parallel hyperparameter search (8×H100).
 #
 # Run it with:
-#   COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile DEFAULT
+#   COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile <your-profile>
 #
 # The referenced file (src/02_train_multigpu.py) is the same file you can Run All as a notebook.
 # It trains many XGBoost trials concurrently — one per GPU — via a thread pool (XGBoost releases
@@ -26,4 +26,4 @@ code_source:
   snapshot:
     root_path: ..
 
-command: NUM_TRIALS=8 NUM_TRAIN_SAMPLES=100000 NUM_TEST_SAMPLES=20000 N_ESTIMATORS=100 python $CODE_SOURCE_PATH/src/02_train_multigpu.py
+command: python $CODE_SOURCE_PATH/src/02_train_multigpu.py

@@ -32,47 +32,108 @@ and all settings are environment variables with sensible defaults.
 
 ## Prerequisites
 
-- **Databricks CLI** authenticated to the workspace (this repo was validated on
-  `e2-demo-field-eng`, profile `DEFAULT`).
-- **AI Runtime CLI**: `uv tool install --force databricks-air --python 3.12` (reuses your Databricks profile).
-- A **Unity Catalog schema** for the registered model and outputs. Default:
-  `hiroshi.air_samples` — override via env vars (see below).
+- A **Databricks workspace where AI Runtime is enabled.** AI Runtime is currently available in
+  **US regions on AWS/Azure** (EU/APJ/GCP were not yet GA as of this writing) — confirm with your
+  Databricks contact if unsure.
+- Permission to **create a Unity Catalog schema and volume** in some catalog (ask your admin which
+  catalog you can write to, or use one you own).
+- macOS/Linux/WSL with a terminal. (This repo was validated on `e2-demo-field-eng`.)
 
-## Quickstart (CLI)
+## Setup — one time, ~10 minutes (no Databricks experience needed)
+
+Run these on your laptop. Replace `<workspace-url>` and pick a profile name (here `air`).
 
 ```bash
-# macOS: COPYFILE_DISABLE=1 keeps AppleDouble (._*) files out of the code snapshot.
+# a) Install the Databricks CLI
+brew install databricks            # macOS; else: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+databricks --version               # need v0.230+
 
-# 1) Train on one A10 with GPU acceleration, log to MLflow, register to Unity Catalog
-COPYFILE_DISABLE=1 air run --file air/train_singlegpu.yaml --watch --profile DEFAULT
+# b) Log in — this opens a browser and saves an auth "profile" named `air`
+databricks auth login --host https://<workspace-url>.cloud.databricks.com --profile air
+databricks current-user me --profile air     # should print your email
 
-# 2) Parallel hyperparameter search across 8× H100 (one trial per GPU); registers the best model
-COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile DEFAULT
+# c) Install the AI Runtime CLI (`air`); it reuses the Databricks profiles above
+curl -LsSf https://astral.sh/uv/install.sh | sh      # installs `uv` if you don't have it
+uv tool install --force databricks-air --python 3.12
+air --version
 
-# 3) GPU batch inference over the synthetic test set, written to a UC Delta table or Volume
-COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile DEFAULT
+# d) Create the Unity Catalog schema + volume this demo writes to (one time).
+#    Pick a catalog you can write to (e.g. `main`, or your own).
+export CATALOG=main                                   # <-- change to YOUR catalog
+databricks schemas create air_samples $CATALOG --profile air
+databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 ```
 
-## Quickstart (notebook)
+> Prefer one command? Run `CATALOG=main PROFILE=air ./setup.sh` (see [`setup.sh`](setup.sh)).
 
-Import any `src/*.py` into the workspace, attach it to AI Runtime, and **Run All**. Start with
+## Point the demo at your catalog
+
+The scripts default to catalog **`hiroshi`**, schema **`air_samples`** (the environment this was
+built in). **Set them to the `$CATALOG` you created above** in either of two ways:
+
+- **Easiest:** edit the two `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each
+  `src/*.py` (search for `UC_CATALOG`), or
+- **Per run:** prefix the YAML `command:` line, e.g.
+  `command: UC_CATALOG=main python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
+
+Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
+
+## Run it (CLI) — do the steps in order
+
+Step 3 needs the model that step 1 (or 2) registers, so **run 01 first.**
+
+```bash
+# macOS: the COPYFILE_DISABLE=1 prefix is REQUIRED — it keeps macOS ._* files out of the
+# uploaded code snapshot (otherwise the job dies immediately). Harmless on Linux.
+
+# 1) Train on one A10 GPU (device="cuda") → MLflow → register to Unity Catalog  (~5 min incl. GPU wait)
+COPYFILE_DISABLE=1 air run --file air/train_singlegpu.yaml --watch --profile air
+
+# 2) Parallel hyperparameter search on 8× H100 — one trial per GPU; registers the best model
+COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile air
+
+# 3) GPU batch inference over the held-out test set → UC table (or a CSV on the UC Volume)
+COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile air
+```
+
+Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a few minutes for a
+GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints "No logs available" even
+for successful runs; trust `Job status` and the MLflow links.)
+
+## Run it (notebook)
+
+Import any `src/*.py` into your Databricks workspace (**Workspace → Import → File**), attach it to
+**AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically. Start with
 `01_train_singlegpu.py`, then `03_batch_inference.py`.
 
 ## Configuration (env vars, with defaults)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `NUM_TRAIN_SAMPLES` / `NUM_TEST_SAMPLES` | `500000` / `100000` (single-GPU); `2000000` / `500000` (multi-GPU) | Dataset size; reduce for smoke tests |
-| `NUM_FEATURES` | `100` | Dimensionality of synthetic data |
-| `NUM_CLASSES` | `2` | Binary or multi-class classification |
-| `N_ESTIMATORS`, `MAX_DEPTH`, `LEARNING_RATE` | `100`/`300`, `7`, `0.1` | XGBoost hyperparameters (02 samples depth/lr/… per trial) |
-| `NUM_TRIALS` (02 only) | `16` | Hyperparameter trials; dispatched one-per-GPU across the node |
-| `UC_CATALOG` / `UC_SCHEMA` | `hiroshi` / `air_samples` | Unity Catalog target |
+| `UC_CATALOG` / `UC_SCHEMA` | `hiroshi` / `air_samples` | **Unity Catalog target — set to your catalog (see above)** |
 | `REGISTERED_MODEL_NAME` | `xgboost_classification` | UC registered model name |
+| `NUM_TRAIN_SAMPLES` / `NUM_TEST_SAMPLES` | `500000` / `100000` | Dataset size; reduce for quick smoke tests |
+| `NUM_FEATURES` / `NUM_CLASSES` | `100` / `2` | Synthetic-data shape |
+| `NUM_TRIALS` (02 only) | `16` | HPO trials; dispatched one-per-GPU across the node |
+| `N_ESTIMATORS`, `MAX_DEPTH`, `LEARNING_RATE` | see scripts | XGBoost hyper-parameters (02 samples these per trial) |
 | `TREE_METHOD` / `DEVICE` (01) | `hist` / `cuda` | XGBoost 2.x GPU switch is `device="cuda"`; auto-falls back to CPU |
 
-Override from the CLI by editing the YAML `command:` line, e.g.
+> **Keep `NUM_*` sample sizes and `RANDOM_STATE` the same across 01 and 03** — step 3 regenerates the
+> identical synthetic dataset and scores its held-out split, so mismatched sizes would score
+> out-of-distribution data. Both default to the same values, so the defaults just work.
+
+Override any of these per run by prefixing the YAML `command:` line, e.g.
 `command: NUM_TRAIN_SAMPLES=100000 python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
+
+## Troubleshooting
+
+| Symptom | Cause & fix |
+|---------|-------------|
+| Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files — always run with `COPYFILE_DISABLE=1` (see above). |
+| `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
+| Step 3 accuracy looks random (~0.5) | 01 and 03 used different `NUM_TRAIN_SAMPLES`/`RANDOM_STATE` → different synthetic data. Keep them equal (defaults do). |
+| `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
+| Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). AI Runtime is US-region only for now. |
 
 ## Repo layout
 
@@ -87,6 +148,7 @@ air-sample-xgboost/
 │   ├── train_multigpu.yaml
 │   └── batch_inference.yaml
 ├── docs/                      # deeper docs (architecture, AIR notes)
+├── setup.sh                   # one-time UC schema + volume creation
 ├── requirements.txt
 └── README.md
 ```

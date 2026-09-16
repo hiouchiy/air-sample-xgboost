@@ -2,7 +2,7 @@
 #
 # Requires a model already registered to Unity Catalog by 01 or 02.
 # Run it with:
-#   air run --file air/batch_inference.yaml --watch --profile DEFAULT
+#   air run --file air/batch_inference.yaml --watch --profile <your-profile>
 
 experiment_name: xgboost-classification-batch-inference
 max_retries: 0
