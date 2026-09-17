@@ -84,7 +84,7 @@ class Config:
     device: str = _env("DEVICE", "cuda")
 
     # Unity Catalog (model registry) -----------------------------------
-    uc_catalog: str = _env("UC_CATALOG", "hiroshi")
+    uc_catalog: str = _env("UC_CATALOG", "main")
     uc_schema: str = _env("UC_SCHEMA", "air_samples")
     registered_model_name: str = _env("REGISTERED_MODEL_NAME", "xgboost_classification")
     register_model: bool = _env("REGISTER_MODEL", "true").lower() == "true"

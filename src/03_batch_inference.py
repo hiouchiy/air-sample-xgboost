@@ -44,7 +44,7 @@ def _env(name: str, default: str) -> str:
 
 @dataclass
 class Config:
-    uc_catalog: str = _env("UC_CATALOG", "hiroshi")
+    uc_catalog: str = _env("UC_CATALOG", "main")
     uc_schema: str = _env("UC_SCHEMA", "air_samples")
     registered_model_name: str = _env("REGISTERED_MODEL_NAME", "xgboost_classification")
     # Empty -> use models:/<catalog>.<schema>.<name>@champion or latest version.
@@ -194,21 +194,20 @@ def run_inference(cfg: Config, booster, X_test):
 # COMMAND ----------
 
 def get_spark():
-    """Best-effort Spark session. AI Runtime notebooks expose `spark`; scripts may not."""
+    """Return an ALREADY-ACTIVE Spark session, or None.
+
+    On a normal Databricks cluster/serverless notebook a `spark` session is pre-created and we
+    reuse it. On AI Runtime GPU nodes there is no Spark, so we return None and the caller writes a
+    UC Volume CSV instead. We deliberately do NOT call `SparkSession.builder.getOrCreate()`: on a
+    GPU node that spawns the `spark-class` launcher, which prints alarming (but harmless) stderr
+    before failing. Returning None keeps the logs clean.
+    """
     try:
         from pyspark.sql import SparkSession
 
-        s = SparkSession.getActiveSession()
-        if s is not None:
-            return s
-        return SparkSession.builder.getOrCreate()
+        return SparkSession.getActiveSession()
     except Exception:
-        try:
-            from databricks.connect import DatabricksSession
-
-            return DatabricksSession.builder.getOrCreate()
-        except Exception:
-            return None
+        return None
 
 
 def persist(cfg: Config, X_test, preds_proba, y_test):

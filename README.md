@@ -68,13 +68,13 @@ databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 
 ## Point the demo at your catalog
 
-The scripts default to catalog **`hiroshi`**, schema **`air_samples`** (the environment this was
-built in). **Set them to the `$CATALOG` you created above** in either of two ways:
+The scripts default to catalog **`main`**, schema **`air_samples`** — the same values the Setup
+step creates. **If you ran Setup with `CATALOG=main`, everything runs unchanged.** To use a
+different catalog, set `UC_CATALOG` either way:
 
-- **Easiest:** edit the two `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each
-  `src/*.py` (search for `UC_CATALOG`), or
-- **Per run:** prefix the YAML `command:` line, e.g.
-  `command: UC_CATALOG=main python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
+- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each `src/*.py`, or
+- prefix the YAML `command:` line, e.g.
+  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
 
@@ -106,11 +106,17 @@ Import any `src/*.py` into your Databricks workspace (**Workspace → Import →
 **AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically. Start with
 `01_train_singlegpu.py`, then `03_batch_inference.py`.
 
+- `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
+  with a thread pool), so attach a **`GPU_8xH100`** AI Runtime compute to get 8-way parallelism. It
+  still runs on a 1-GPU compute (trials just run sequentially).
+- The **first** run waits several minutes (~5 min on A10, ~7 min on 8×H100) for GPU capacity before
+  any cell executes — that's normal cold start, not a hang.
+
 ## Configuration (env vars, with defaults)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `UC_CATALOG` / `UC_SCHEMA` | `hiroshi` / `air_samples` | **Unity Catalog target — set to your catalog (see above)** |
+| `UC_CATALOG` / `UC_SCHEMA` | `main` / `air_samples` | Unity Catalog target (matches Setup; change only to use another catalog) |
 | `REGISTERED_MODEL_NAME` | `xgboost_classification` | UC registered model name |
 | `NUM_TRAIN_SAMPLES` / `NUM_TEST_SAMPLES` | `500000` / `100000` | Dataset size; reduce for quick smoke tests |
 | `NUM_FEATURES` / `NUM_CLASSES` | `100` / `2` | Synthetic-data shape |
@@ -132,6 +138,7 @@ Override any of these per run by prefixing the YAML `command:` line, e.g.
 | Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files — always run with `COPYFILE_DISABLE=1` (see above). |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
 | Step 3 accuracy looks random (~0.5) | 01 and 03 used different `NUM_TRAIN_SAMPLES`/`RANDOM_STATE` → different synthetic data. Keep them equal (defaults do). |
+| Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless if followed by `Wrote ... to UC Volume`. AI Runtime GPU nodes have no Spark, so 03 writes a CSV to the UC Volume. These lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore. |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
 | Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). AI Runtime is US-region only for now. |
 
