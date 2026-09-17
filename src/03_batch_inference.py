@@ -2,10 +2,10 @@
 # MAGIC %md
 # MAGIC # XGBoost — GPU batch inference on AI Runtime
 # MAGIC
-# MAGIC Loads the trained XGBoost model that `01` or `02` registered to **Unity Catalog** and
-# MAGIC runs **GPU batch inference** over a synthetic test set on an AI Runtime GPU. It reports
-# MAGIC accuracy and throughput, and writes the scored rows to a **Unity Catalog Delta table**
-# MAGIC (falling back to a CSV on a UC Volume if no Spark session is available).
+# MAGIC Loads the trained XGBoost model that `01` or `02` registered to **Unity Catalog**
+# MAGIC (the `@champion` version) and runs **GPU batch inference** over the held-out test set on an
+# MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
+# MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
 # MAGIC
 # MAGIC ## Runs two ways, without code changes
 # MAGIC 1. **Notebook** — open and *Run All* on AI Runtime.
@@ -55,7 +55,6 @@ class Config:
     # identical synthetic dataset (same n_samples total, shuffle=False, random_state) and take the
     # held-out test split — matching 01_train_singlegpu.py exactly. (make_classification's per-
     # cluster transforms depend on the RNG stream, so the total sample count must match training.)
-    # In production, load real rows from a UC table via INPUT_TABLE instead.
     num_train_samples: int = int(_env("NUM_TRAIN_SAMPLES", "500000"))
     num_test_samples: int = int(_env("NUM_TEST_SAMPLES", "100000"))
     num_features: int = int(_env("NUM_FEATURES", "100"))
@@ -63,9 +62,7 @@ class Config:
     batch_size: int = int(_env("BATCH_SIZE", "10000"))
     random_state: int = int(_env("RANDOM_STATE", "42"))
 
-    input_table: str = _env("INPUT_TABLE", "")  # optional UC table with features
-
-    output_table: str = _env("OUTPUT_TABLE", "xgboost_classification_predictions")
+    output_name: str = _env("OUTPUT_NAME", "xgboost_classification_predictions")
 
     @property
     def uc_model_fqn(self) -> str:
@@ -74,10 +71,6 @@ class Config:
     @property
     def resolved_model_uri(self) -> str:
         return self.model_uri or f"models:/{self.uc_model_fqn}@champion"
-
-    @property
-    def output_table_fqn(self) -> str:
-        return f"{self.uc_catalog}.{self.uc_schema}.{self.output_table}"
 
 
 CFG = Config()
@@ -130,20 +123,8 @@ from sklearn.datasets import make_classification
 
 
 def load_inputs(cfg: Config):
-    """Load test data: either from UC table or generate synthetic."""
-    if cfg.input_table:
-        spark = get_spark()
-        if spark is None:
-            raise RuntimeError("INPUT_TABLE set but no Spark session is available.")
-        pdf = spark.table(cfg.input_table).limit(cfg.num_test_samples).toPandas()
-        # Assuming columns are named f0, f1, ..., fn and optionally 'label'
-        feature_cols = [c for c in pdf.columns if c.startswith("f")]
-        X = pdf[feature_cols].values
-        y = pdf["label"].values if "label" in pdf.columns else None
-        return X, y
-
-    # Regenerate the identical dataset used in training and return the held-out test split, so
-    # the model scores in-distribution data (see the Config note).
+    """Regenerate the identical dataset used in training and return the held-out test split, so
+    the model scores in-distribution data (see the Config note)."""
     from sklearn.model_selection import train_test_split
 
     total = cfg.num_train_samples + cfg.num_test_samples
@@ -189,57 +170,26 @@ def run_inference(cfg: Config, booster, X_test):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Persist predictions to Unity Catalog (with graceful fallback)
+# MAGIC ## 6. Write predictions to a Unity Catalog Volume
+# MAGIC A plain file write to the UC Volume — no Spark involved.
 
 # COMMAND ----------
 
-def get_spark():
-    """Return an ALREADY-ACTIVE Spark session, or None.
-
-    On a normal Databricks cluster/serverless notebook a `spark` session is pre-created and we
-    reuse it. On AI Runtime GPU nodes there is no Spark, so we return None and the caller writes a
-    UC Volume CSV instead. We deliberately do NOT call `SparkSession.builder.getOrCreate()`: on a
-    GPU node that spawns the `spark-class` launcher, which prints alarming (but harmless) stderr
-    before failing. Returning None keeps the logs clean.
-    """
-    try:
-        from pyspark.sql import SparkSession
-
-        return SparkSession.getActiveSession()
-    except Exception:
-        return None
-
-
 def persist(cfg: Config, X_test, preds_proba, y_test):
-    """Write predictions to UC table or Volume CSV."""
     import pandas as pd
 
-    rows = {
-        "predicted_probability": preds_proba,
-    }
+    rows = {"predicted_probability": preds_proba}
     if cfg.num_classes == 2:
         rows["predicted_class"] = (preds_proba > 0.5).astype(int)
     else:
         rows["predicted_class"] = np.argmax(preds_proba, axis=-1)
-
     if y_test is not None:
         rows["true_label"] = y_test
-
     pdf = pd.DataFrame(rows)
 
-    spark = get_spark()
-    if spark is not None:
-        try:
-            spark.createDataFrame(pdf).write.mode("overwrite").saveAsTable(cfg.output_table_fqn)
-            print(f"Wrote {len(pdf)} predictions to UC table {cfg.output_table_fqn}")
-            return cfg.output_table_fqn
-        except Exception as exc:
-            print(f"Spark write failed ({exc}); falling back to UC Volume CSV.")
-
-    # Fallback: write to UC Volume.
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
     os.makedirs(out_dir, exist_ok=True)
-    path = f"{out_dir}/{cfg.output_table}.csv"
+    path = f"{out_dir}/{cfg.output_name}.csv"
     pdf.to_csv(path, index=False)
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")
     return path

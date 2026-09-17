@@ -284,8 +284,20 @@ def log_and_register(cfg: Config, booster, metrics):
         )
         print("Logged model:", model_info.model_uri)
         if cfg.register_model:
-            print("Registered to Unity Catalog:", cfg.uc_model_fqn)
+            _promote_to_champion(cfg, model_info)
         return run.info.run_id
+
+
+def _promote_to_champion(cfg: Config, model_info):
+    """Tag the just-registered version with the @champion alias — this is what batch inference
+    (03) loads by default, so version promotion is explicit and governed."""
+    from mlflow.tracking import MlflowClient
+
+    version = model_info.registered_model_version
+    client = MlflowClient(registry_uri="databricks-uc")
+    client.set_registered_model_alias(cfg.uc_model_fqn, "champion", version)
+    print(f"Registered {cfg.uc_model_fqn} as version {version} and set alias @champion "
+          f"(this is the version 03 will load).")
 
 # COMMAND ----------
 

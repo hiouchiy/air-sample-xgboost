@@ -16,6 +16,18 @@ the model to **Unity Catalog**, and runs **GPU batch inference** to predict on n
 | 2. Multi-GPU HPO | [`src/02_train_multigpu.py`](src/02_train_multigpu.py) | `GPU_8xH100` | Parallel hyperparameter search — one trial per GPU across all 8 |
 | 3. GPU batch inference | [`src/03_batch_inference.py`](src/03_batch_inference.py) | `GPU_1xA10` | Loading the UC model, batched GPU scoring, writing to UC |
 
+## What lands in the Databricks platform (in both modes)
+
+Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks platform:
+
+- **MLflow experiment tracking** — 01/03 log params, metrics and the model to an MLflow run; **02
+  logs every HPO trial as its own nested run** so you can compare all candidates in the Experiments UI.
+- **Unity Catalog Model Registry + versioning** — 01/02 register the model to
+  `main.air_samples.xgboost_classification`, creating a new **version** each run and promoting it to
+  the **`@champion`** alias (02 promotes the best trial). 03 loads `@champion`, so version promotion
+  is explicit and governed — no manual step.
+- **Unity Catalog Volumes** — 03 writes its prediction file to a UC Volume.
+
 ## Every script runs two ways, with no code changes
 
 This is a hard requirement for these samples:

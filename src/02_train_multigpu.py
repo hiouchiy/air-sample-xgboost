@@ -256,7 +256,13 @@ def log_and_register(cfg: Config, results, wall, n_gpu):
         print("Best trial:", {k: best[k] for k in ("trial", "gpu", "auc", "accuracy", "params")})
         print("Logged model:", info.model_uri)
         if cfg.register_model:
-            print("Registered to Unity Catalog:", cfg.uc_model_fqn)
+            from mlflow.tracking import MlflowClient
+
+            v = info.registered_model_version
+            MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+                cfg.uc_model_fqn, "champion", v)
+            print(f"Registered {cfg.uc_model_fqn} version {v} and set alias @champion "
+                  f"(this is the version 03 will load).")
         return run.info.run_id
 
 # COMMAND ----------
