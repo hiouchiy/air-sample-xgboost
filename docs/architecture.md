@@ -13,10 +13,10 @@
                       └────────┼───────────────────────────────────────
                                ▼
                 Unity Catalog registered model
-                hiroshi.air_samples.xgboost_classification
+                main.air_samples.xgboost_classification  (promoted to @champion)
                                │
                  03 GPU batch inference (AI Runtime GPU)
-                 → predictions to a UC table / Volume CSV
+                 → predictions CSV on a UC Volume
 ```
 
 ## Model & data
@@ -65,14 +65,15 @@ single-GPU trainer both run in one process.
 1. **Environment version 4 preinstalls** Python 3.12, torch 2.7.1+cu126, mlflow, scikit-learn, and
    serverless_gpu. It does **not** include `xgboost` — the YAML/`%pip` add it (pinned `>=2.1,<3`).
 2. **Model logging + UC registration works with the standard API**:
-   `mlflow.xgboost.log_model(..., registered_model_name="hiroshi.air_samples.xgboost_classification")`
+   `mlflow.xgboost.log_model(..., registered_model_name="main.air_samples.xgboost_classification")`
    inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
+   01/02 also promote the new version to the `@champion` alias, which 03 loads.
 3. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
    out of the code snapshot.
 4. **`air logs` may report "No logs available"** even for successful runs; on e2 `air run --watch`
    streams execution logs live. For debugging, write to a UC Volume.
-5. **No Spark on AI Runtime GPU nodes** — batch inference (`03`) tries a Spark Delta write and falls
-   back to a CSV on a UC Volume (`/Volumes/hiroshi/air_samples/predictions/`).
+5. **No Spark on AI Runtime GPU nodes** — so batch inference (`03`) writes its predictions directly
+   to a CSV on a UC Volume (`/Volumes/<catalog>/air_samples/predictions/`); it never invokes Spark.
 
 ## Files
 
@@ -80,7 +81,7 @@ single-GPU trainer both run in one process.
 |------|------|
 | `src/01_train_singlegpu.py` + `air/train_singlegpu.yaml` | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
 | `src/02_train_multigpu.py` + `air/train_multigpu.yaml` | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
-| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference from the UC model → UC table / Volume CSV |
+| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference from the UC model → predictions CSV on a UC Volume |
 
 ## References
 

@@ -104,7 +104,7 @@ COPYFILE_DISABLE=1 air run --file air/train_singlegpu.yaml --watch --profile air
 # 2) Parallel hyperparameter search on 8× H100 — one trial per GPU; registers the best model
 COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile air
 
-# 3) GPU batch inference over the held-out test set → UC table (or a CSV on the UC Volume)
+# 3) GPU batch inference over the held-out test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile air
 ```
 
