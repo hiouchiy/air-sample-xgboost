@@ -7,9 +7,13 @@
 # MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
 # MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
 # MAGIC
-# MAGIC ## Runs two ways, without code changes
-# MAGIC 1. **Notebook** — open and *Run All* on AI Runtime.
-# MAGIC 2. **AI Runtime CLI** — `air run --file air/batch_inference.yaml --watch`.
+# MAGIC ## How to run this notebook
+# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (`GPU_1xA10` is enough),
+# MAGIC and **Run All**. The `%pip` cell below installs the dependencies. Run `01` (or `02`) first — it
+# MAGIC registers the model and sets the `@champion` alias this step loads.
+# MAGIC
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/03_batch_inference.py` — run
+# MAGIC > it with `air run --file 02_cli/batch_inference.yaml --watch`.
 
 # COMMAND ----------
 
@@ -28,9 +32,9 @@
 
 # MAGIC %md
 # MAGIC ## 2. Configuration
-# MAGIC By default we load the latest version of the registered UC model and score a synthetic
-# MAGIC test set. Point `MODEL_URI` at a specific version/alias, or `INPUT_TABLE` at your own
-# MAGIC Unity Catalog table to score real data.
+# MAGIC By default we load the registered UC model's **`@champion`** alias and score the held-out
+# MAGIC synthetic test split. Point `MODEL_URI` at a specific version or alias to score with a
+# MAGIC different model.
 
 # COMMAND ----------
 

@@ -11,17 +11,15 @@
 # MAGIC XGBoost on GPU (`tree_method="hist"` + `device="cuda"`, the XGBoost 2.x API) delivers a large
 # MAGIC speedup over CPU for big datasets (100k+ rows). This example uses **500k rows × 100 features**
 # MAGIC to make the GPU speedup tangible. The model is a production-ready gradient-boosted classifier;
-# MAGIC step 02 shows genuine multi-GPU data-parallel training for datasets too large for one GPU.
+# MAGIC step 02 shows how to put many GPUs to work for classic ML via parallel hyperparameter search.
 # MAGIC
-# MAGIC ## This notebook runs two ways, **without any code changes**
-# MAGIC 1. **As a Databricks notebook** — open it in the workspace and *Run All*. The
-# MAGIC    `# MAGIC %pip` cells below install dependencies in the notebook only.
-# MAGIC 2. **As an AI Runtime CLI job** — `air run --file air/train_singlegpu.yaml`.
-# MAGIC    The `# MAGIC` lines are plain Python comments and are ignored; dependencies come
-# MAGIC    from the YAML `environment.dependencies` instead.
+# MAGIC ## How to run this notebook
+# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (a single-GPU
+# MAGIC `GPU_1xA10` is enough), and **Run All**. The `# MAGIC %pip` cells below install the
+# MAGIC dependencies. All behaviour is controlled by environment variables (see the `Config` cell).
 # MAGIC
-# MAGIC All behaviour is controlled by environment variables (see the `Config` cell), so the
-# MAGIC exact same file is portable across both execution modes.
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/01_train_singlegpu.py` —
+# MAGIC > run it with `air run --file 02_cli/train_singlegpu.yaml` (dependencies come from that YAML).
 
 # COMMAND ----------
 
@@ -42,10 +40,9 @@
 
 # MAGIC %md
 # MAGIC ## 2. Configuration
-# MAGIC Every knob is an environment variable with a sensible default, so the notebook and the
-# MAGIC CLI job behave identically. Override any value from the CLI with, e.g.
-# MAGIC `air run --file air/train_singlegpu.yaml --override 'command=NUM_TRAIN_SAMPLES=1000000 python ...'`
-# MAGIC or by editing `environment` variables in the YAML.
+# MAGIC Every knob is an environment variable with a sensible default. In the notebook you can set
+# MAGIC one before running, e.g. `import os; os.environ["NUM_TRAIN_SAMPLES"] = "1000000"`. (The CLI
+# MAGIC form sets them in the workload YAML — see `02_cli/train_singlegpu.yaml`.)
 
 # COMMAND ----------
 

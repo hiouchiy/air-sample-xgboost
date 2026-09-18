@@ -17,9 +17,14 @@
 # MAGIC multi-GPU mode, reserved for datasets too large for one GPU; on AI Runtime it needs a custom
 # MAGIC RAPIDS image, whereas this parallel-HPO pattern runs on the stock environment.)
 # MAGIC
-# MAGIC ## Runs two ways, without code changes
-# MAGIC 1. **Notebook** — open in the workspace and *Run All* (attach to AI Runtime).
-# MAGIC 2. **AI Runtime CLI** — `air run --file air/train_multigpu.yaml --watch --profile DEFAULT`.
+# MAGIC ## How to run this notebook
+# MAGIC Import it into the workspace and **Run All**. It parallelizes over **whatever GPUs are
+# MAGIC attached** (`torch.cuda.device_count()` with a thread pool), so attach a **`GPU_8xH100`** AI
+# MAGIC Runtime compute to get 8-way parallelism. It still runs on a 1-GPU compute — the trials just
+# MAGIC run sequentially. The `%pip` cell below installs the dependencies.
+# MAGIC
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/02_train_multigpu.py` — run
+# MAGIC > it with `air run --file 02_cli/train_multigpu.yaml --watch`.
 
 # COMMAND ----------
 
