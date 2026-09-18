@@ -26,4 +26,4 @@ code_source:
   snapshot:
     root_path: ..
 
-command: python $CODE_SOURCE_PATH/src/02_train_multigpu.py
+command: python $CODE_SOURCE_PATH/02_cli/02_train_multigpu.py

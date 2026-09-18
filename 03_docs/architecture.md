@@ -50,15 +50,20 @@ XGBoost has two distinct ways to use more than one GPU. They solve different pro
 > to a single GPU; reach for parallel HPO to use many GPUs, or Dask/Spark data-parallel only when the
 > data genuinely exceeds one GPU.
 
-## Notebook + CLI dual-mode (no code changes)
+## Notebook and CLI forms
 
-Each `src/*.py` carries Databricks notebook markers that are also valid Python comments
-(`# Databricks notebook source`, `# COMMAND ----------`, `# MAGIC %pip`/`%md`). Opened in the
-workspace they become real cells (the `%pip` cells install deps); run by the AI Runtime CLI the
-`# MAGIC` lines are inert and deps come from the workload YAML. A single
-`if __name__ == "__main__": main()` triggers execution in both. All config is environment variables
-with defaults. Neither `01`, `02` nor `03` needs `torchrun` — the parallel-HPO threads and the
-single-GPU trainer both run in one process.
+Each step exists as two files that share the same logic:
+
+- **`01_notebook/*.py`** — Databricks notebook source (`# Databricks notebook source`,
+  `# COMMAND ----------`, `# MAGIC %pip`/`%md`). Imported into the workspace these become real cells
+  (the `%pip` cells install deps) and *Run All* executes it.
+- **`02_cli/*.py`** — the same logic as a plain Python script (markers stripped), submitted with
+  `air run`; deps come from the workload YAML. Each pairs with a `02_cli/*.yaml` spec.
+
+All config is environment variables with defaults, so neither form needs editing. Note that **none of
+`01`/`02`/`03` uses `torchrun` or `serverless_gpu`** — the parallel-HPO thread pool and the
+single-GPU trainer both run in one process, so the notebook and CLI files differ only by the
+notebook markers.
 
 ## AI Runtime operational notes (validated on e2-demo-field-eng)
 
@@ -79,9 +84,11 @@ single-GPU trainer both run in one process.
 
 | File | Role |
 |------|------|
-| `src/01_train_singlegpu.py` + `air/train_singlegpu.yaml` | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
-| `src/02_train_multigpu.py` + `air/train_multigpu.yaml` | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
-| `src/03_batch_inference.py` + `air/batch_inference.yaml` | GPU batch inference from the UC model → predictions CSV on a UC Volume |
+| `01_train_singlegpu.py` (+ `02_cli/train_singlegpu.yaml`) | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
+| `02_train_multigpu.py` (+ `02_cli/train_multigpu.yaml`) | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
+| `03_batch_inference.py` (+ `02_cli/batch_inference.yaml`) | GPU batch inference from the UC model → predictions CSV on a UC Volume |
+
+Each of the above exists in both `01_notebook/` (Run All) and `02_cli/` (`air run`) form.
 
 ## References
 

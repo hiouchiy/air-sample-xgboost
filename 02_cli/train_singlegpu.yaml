@@ -28,4 +28,4 @@ code_source:
   snapshot:
     root_path: ..
 
-command: python $CODE_SOURCE_PATH/src/01_train_singlegpu.py
+command: python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py

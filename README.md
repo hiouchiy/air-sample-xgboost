@@ -1,22 +1,34 @@
 # AI Runtime sample: XGBoost GPU classification
 
 End-to-end **XGBoost GPU training, batch inference** on **Databricks AI Runtime**
-(serverless NVIDIA GPUs). It trains an **XGBoost classifier** on a large synthetic
-binary classification dataset (500k–2M rows × 100 features) — demonstrating **GPU-accelerated
-gradient boosting** (10–20× faster than CPU), tracks everything with **MLflow**, registers
-the model to **Unity Catalog**, and runs **GPU batch inference** to predict on new data.
+(serverless NVIDIA GPUs). It trains an **XGBoost classifier** on a large synthetic binary
+classification dataset (500k rows × 100 features) — demonstrating **GPU-accelerated gradient
+boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**, and runs
+**GPU batch inference** to predict on new data.
 
-> **Repo name**: `air-sample-xgboost`. AIR = AI Runtime.
+> **Repo name is tentative** (`air-sample-xgboost`). AIR = AI Runtime.
+
+## Two ways to run — one folder each
+
+Each step ships in **two forms**, so you can pick whichever fits and neither needs editing:
+
+- **`01_notebook/`** — Databricks notebooks (`# Databricks notebook source` `.py`). **Import into the
+  workspace and Run All.** Rich per-cell markdown; `%pip` cells install dependencies.
+- **`02_cli/`** — plain Python scripts + AI Runtime CLI workload YAMLs. **Submit with `air run`.**
+  No notebook markers; dependencies come from the YAML.
+
+Both forms share the same logic and are driven by environment variables with sensible defaults.
+`03_docs/` has the architecture write-up.
 
 ## What it demonstrates
 
-| Step | File | AIR compute | Shows |
-|------|------|-------------|-------|
-| 1. Single-GPU training | [`src/01_train_singlegpu.py`](src/01_train_singlegpu.py) | `GPU_1xA10` | GPU-accelerated XGBoost, MLflow tracking, UC registration |
-| 2. Multi-GPU HPO | [`src/02_train_multigpu.py`](src/02_train_multigpu.py) | `GPU_8xH100` | Parallel hyperparameter search — one trial per GPU across all 8 |
-| 3. GPU batch inference | [`src/03_batch_inference.py`](src/03_batch_inference.py) | `GPU_1xA10` | Loading the UC model, batched GPU scoring, writing to UC |
+| Step | Notebook / CLI script | AIR compute | Shows |
+|------|-----------------------|-------------|-------|
+| 1. Single-GPU training | `01_train_singlegpu.py` | `GPU_1xA10` | GPU-accelerated XGBoost, MLflow tracking, UC registration + `@champion` |
+| 2. Multi-GPU HPO | `02_train_multigpu.py` | `GPU_8xH100` | Parallel hyperparameter search — one trial per GPU across all 8 |
+| 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
 
-## What lands in the Databricks platform (in both modes)
+## What lands in the Databricks platform (both forms)
 
 Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks platform:
 
@@ -26,21 +38,7 @@ Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks
   `main.air_samples.xgboost_classification`, creating a new **version** each run and promoting it to
   the **`@champion`** alias (02 promotes the best trial). 03 loads `@champion`, so version promotion
   is explicit and governed — no manual step.
-- **Unity Catalog Volumes** — 03 writes its prediction file to a UC Volume.
-
-## Every script runs two ways, with no code changes
-
-This is a hard requirement for these samples:
-
-1. **As a Databricks notebook** — import the `.py` into the workspace (it carries
-   `# Databricks notebook source` markers) and **Run All** on AI Runtime. The `# MAGIC %pip`
-   cells install dependencies in the notebook.
-2. **As an AI Runtime CLI job** — `air run --file air/<step>.yaml`. The `# MAGIC` lines are plain
-   Python comments (ignored); dependencies come from the YAML `environment.dependencies`.
-
-The same file works in both because logic lives in functions, the entry point is a single
-`if __name__ == "__main__": main()` (Databricks notebooks also expose `__name__ == "__main__"`),
-and all settings are environment variables with sensible defaults.
+- **Unity Catalog Volumes** — 03 writes its prediction CSV to a UC Volume.
 
 ## Prerequisites
 
@@ -51,7 +49,7 @@ and all settings are environment variables with sensible defaults.
   catalog you can write to, or use one you own).
 - macOS/Linux/WSL with a terminal. (This repo was validated on `e2-demo-field-eng`.)
 
-## Setup — one time, ~10 minutes (no Databricks experience needed)
+## Setup — one time, ~10 minutes
 
 Run these on your laptop. Replace `<workspace-url>` and pick a profile name (here `air`).
 
@@ -84,13 +82,13 @@ The scripts default to catalog **`main`**, schema **`air_samples`** — the same
 step creates. **If you ran Setup with `CATALOG=main`, everything runs unchanged.** To use a
 different catalog, set `UC_CATALOG` either way:
 
-- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each `src/*.py`, or
+- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each script, or
 - prefix the YAML `command:` line, e.g.
-  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
+  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
 
-## Run it (CLI) — do the steps in order
+## Run it via the CLI (`02_cli/`) — do the steps in order
 
 Step 3 needs the model that step 1 (or 2) registers, so **run 01 first.**
 
@@ -99,24 +97,24 @@ Step 3 needs the model that step 1 (or 2) registers, so **run 01 first.**
 # uploaded code snapshot (otherwise the job dies immediately). Harmless on Linux.
 
 # 1) Train on one A10 GPU (device="cuda") → MLflow → register to Unity Catalog  (~5 min incl. GPU wait)
-COPYFILE_DISABLE=1 air run --file air/train_singlegpu.yaml --watch --profile air
+COPYFILE_DISABLE=1 air run --file 02_cli/train_singlegpu.yaml --watch --profile air
 
 # 2) Parallel hyperparameter search on 8× H100 — one trial per GPU; registers the best model
-COPYFILE_DISABLE=1 air run --file air/train_multigpu.yaml --watch --profile air
+COPYFILE_DISABLE=1 air run --file 02_cli/train_multigpu.yaml --watch --profile air
 
 # 3) GPU batch inference over the held-out test set → predictions CSV on the UC Volume
-COPYFILE_DISABLE=1 air run --file air/batch_inference.yaml --watch --profile air
+COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
 ```
 
 Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a few minutes for a
 GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints "No logs available" even
 for successful runs; trust `Job status` and the MLflow links.)
 
-## Run it (notebook)
+## Run it as a notebook (`01_notebook/`)
 
-Import any `src/*.py` into your Databricks workspace (**Workspace → Import → File**), attach it to
-**AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically. Start with
-`01_train_singlegpu.py`, then `03_batch_inference.py`.
+Import a file from `01_notebook/` into your Databricks workspace (**Workspace → Import → File**),
+attach it to **AI Runtime**, and **Run All**. The `%pip` cells install dependencies automatically.
+Start with `01_train_singlegpu.py`, then `03_batch_inference.py`.
 
 - `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
   with a thread pool), so attach a **`GPU_8xH100`** AI Runtime compute to get 8-way parallelism. It
@@ -140,8 +138,8 @@ Import any `src/*.py` into your Databricks workspace (**Workspace → Import →
 > identical synthetic dataset and scores its held-out split, so mismatched sizes would score
 > out-of-distribution data. Both default to the same values, so the defaults just work.
 
-Override any of these per run by prefixing the YAML `command:` line, e.g.
-`command: NUM_TRAIN_SAMPLES=100000 python $CODE_SOURCE_PATH/src/01_train_singlegpu.py`.
+Override per run by prefixing the YAML `command:` line, e.g.
+`command: NUM_TRAIN_SAMPLES=100000 python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
 
 ## Troubleshooting
 
@@ -150,7 +148,7 @@ Override any of these per run by prefixing the YAML `command:` line, e.g.
 | Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files — always run with `COPYFILE_DISABLE=1` (see above). |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
 | Step 3 accuracy looks random (~0.5) | 01 and 03 used different `NUM_TRAIN_SAMPLES`/`RANDOM_STATE` → different synthetic data. Keep them equal (defaults do). |
-| Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless if followed by `Wrote ... to UC Volume`. AI Runtime GPU nodes have no Spark, so 03 writes a CSV to the UC Volume. These lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore. |
+| Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless. AI Runtime GPU nodes have no Spark; these lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore — 03 writes a CSV to the UC Volume. |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
 | Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). AI Runtime is US-region only for now. |
 
@@ -158,18 +156,20 @@ Override any of these per run by prefixing the YAML `command:` line, e.g.
 
 ```
 air-sample-xgboost/
-├── src/                       # notebook-and-CLI dual-mode Python scripts
+├── 01_notebook/               # Databricks notebooks — import + Run All
 │   ├── 01_train_singlegpu.py
 │   ├── 02_train_multigpu.py
 │   └── 03_batch_inference.py
-├── air/                       # AI Runtime CLI workload specs (one per step)
+├── 02_cli/                    # AI Runtime CLI — plain scripts + workload YAMLs (air run)
+│   ├── 01_train_singlegpu.py … 03_batch_inference.py
 │   ├── train_singlegpu.yaml
 │   ├── train_multigpu.yaml
 │   └── batch_inference.yaml
-├── docs/                      # deeper docs (architecture, AIR notes)
+├── 03_docs/                   # architecture walkthrough & AI Runtime notes
+│   └── architecture.md
 ├── setup.sh                   # one-time UC schema + volume creation
 ├── requirements.txt
 └── README.md
 ```
 
-See [`docs/`](docs/) for the architecture walkthrough and AI Runtime specifics.
+See [`03_docs/architecture.md`](03_docs/architecture.md) for the architecture walkthrough and AI Runtime specifics.

@@ -29,8 +29,8 @@ databricks volumes create "$CATALOG" "$SCHEMA" predictions MANAGED --profile "$P
 cat <<EOF
 
 Done. Now point the demo at this catalog by either:
-  - editing the UC_CATALOG / UC_SCHEMA default lines near the top of each src/*.py, or
-  - prefixing the command in each air/*.yaml, e.g.:
-      command: UC_CATALOG=$CATALOG python \$CODE_SOURCE_PATH/src/01_train_singlegpu.py
-Then run:  COPYFILE_DISABLE=1 air run --file air/train_singlegpu.yaml --watch --profile $PROFILE
+  - editing the UC_CATALOG / UC_SCHEMA default lines near the top of each 02_cli/*.py, or
+  - prefixing the command in each 02_cli/*.yaml, e.g.:
+      command: UC_CATALOG=$CATALOG python \$CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py
+Then run:  COPYFILE_DISABLE=1 air run --file 02_cli/train_singlegpu.yaml --watch --profile $PROFILE
 EOF
