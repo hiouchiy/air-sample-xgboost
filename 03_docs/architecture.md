@@ -69,7 +69,7 @@ All config is environment variables with defaults, so neither form needs editing
 single-GPU trainer both run in one process, so the notebook and CLI files differ only by the
 notebook markers.
 
-## AI Runtime operational notes (validated on e2-demo-field-eng)
+## AI Runtime operational notes
 
 1. **Environment version 4 preinstalls** Python 3.12, torch 2.7.1+cu126, mlflow, scikit-learn, and
    serverless_gpu. It does **not** include `xgboost` — the YAML/`%pip` add it (pinned `>=2.1,<3`).
@@ -78,11 +78,11 @@ notebook markers.
    inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
    01/02 also promote the new version to the `@champion` alias, which 03 loads.
 3. **The dataset downloads at job start** via `fetch_covtype` — the GPU node needs egress to the
-   scikit-learn data host (works on e2-demo-field-eng). In a locked-down workspace, pre-stage the
+   scikit-learn data host. In a locked-down workspace, pre-stage the
    data in a UC Volume and point the loader at it instead.
 4. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
    out of the code snapshot.
-5. **`air logs` may report "No logs available"** even for successful runs; on e2 `air run --watch`
+5. **`air logs` may report "No logs available"** even for successful runs; `air run --watch`
    streams execution logs live. For debugging, write to a UC Volume.
 6. **No Spark on AI Runtime GPU nodes** — so batch inference (`03`) writes its predictions directly
    to a CSV on a UC Volume (`/Volumes/<catalog>/air_samples/predictions/`); it never invokes Spark.

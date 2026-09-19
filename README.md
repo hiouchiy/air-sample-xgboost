@@ -6,7 +6,7 @@ CoverType** dataset (581,012 rows × 54 features, 7 classes) — demonstrating *
 gradient boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**, and
 runs **GPU batch inference** to predict on new data.
 
-> **Repo name is tentative** (`air-sample-xgboost`). AIR = AI Runtime.
+> AIR = AI Runtime.
 
 ## Two ways to run — one folder each
 
@@ -47,7 +47,7 @@ Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks
   Databricks contact if unsure.
 - Permission to **create a Unity Catalog schema and volume** in some catalog (ask your admin which
   catalog you can write to, or use one you own).
-- macOS/Linux/WSL with a terminal. (This repo was validated on `e2-demo-field-eng`.)
+- macOS/Linux/WSL with a terminal. (Validated on a US-region AWS workspace with AI Runtime enabled.)
 
 ## Setup — one time, ~10 minutes
 
