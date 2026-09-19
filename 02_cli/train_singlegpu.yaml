@@ -1,11 +1,10 @@
-# AI Runtime CLI workload spec — XGBoost single-GPU training on synthetic classification.
+# AI Runtime CLI workload spec — XGBoost single-GPU training on Forest CoverType.
 #
 # Run it with:
-#   air run --file air/train_singlegpu.yaml --watch --profile <your-profile>
+#   COPYFILE_DISABLE=1 air run --file 02_cli/train_singlegpu.yaml --watch --profile <your-profile>
 #
-# The referenced Python file (src/01_train_singlegpu.py) is the SAME file you can
-# open and Run All as a Databricks notebook — no code changes between the two modes.
-# Dependencies are declared here (not via %pip) so the shared script stays portable.
+# It runs 02_cli/01_train_singlegpu.py. The notebook-optimized equivalent, for import + Run All,
+# is 01_notebook/01_train_singlegpu.py. Dependencies are declared here (not via %pip).
 
 experiment_name: xgboost-classification-singlegpu
 max_retries: 0

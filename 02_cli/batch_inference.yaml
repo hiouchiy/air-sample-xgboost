@@ -2,13 +2,13 @@
 #
 # Requires a model already registered to Unity Catalog by 01 or 02.
 # Run it with:
-#   air run --file air/batch_inference.yaml --watch --profile <your-profile>
+#   COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile <your-profile>
 
 experiment_name: xgboost-classification-batch-inference
 max_retries: 0
 
 environment:
-  # Version "4" preinstalls. We add xgboost and scikit-learn for data generation.
+  # Version "4" preinstalls. We add xgboost and scikit-learn (for the dataset + metrics).
   version: "4"
   dependencies:
     - "xgboost>=2.1,<3"

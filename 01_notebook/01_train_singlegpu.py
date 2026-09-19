@@ -1,17 +1,18 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # XGBoost — Single-GPU training on synthetic classification (Databricks AI Runtime)
+# MAGIC # XGBoost — Single-GPU training on Forest CoverType (Databricks AI Runtime)
 # MAGIC
-# MAGIC This example trains an **XGBoost classifier** on a large synthetic classification dataset
-# MAGIC using a **single GPU** on Databricks AI Runtime. It demonstrates **GPU-accelerated gradient
-# MAGIC boosting** (up to 20× faster than CPU), tracks the run with **MLflow**, and registers the
-# MAGIC trained model to **Unity Catalog** for batch inference and serving.
+# MAGIC This example trains an **XGBoost multi-class classifier** on the public **Forest CoverType**
+# MAGIC dataset (581,012 rows × 54 features, 7 forest-cover-type classes) using a **single GPU** on
+# MAGIC Databricks AI Runtime. It demonstrates **GPU-accelerated gradient boosting**, tracks the run
+# MAGIC with **MLflow**, and registers the trained model to **Unity Catalog** for batch inference.
 # MAGIC
 # MAGIC ## Why XGBoost on GPU?
 # MAGIC XGBoost on GPU (`tree_method="hist"` + `device="cuda"`, the XGBoost 2.x API) delivers a large
-# MAGIC speedup over CPU for big datasets (100k+ rows). This example uses **500k rows × 100 features**
-# MAGIC to make the GPU speedup tangible. The model is a production-ready gradient-boosted classifier;
-# MAGIC step 02 shows how to put many GPUs to work for classic ML via parallel hyperparameter search.
+# MAGIC speedup over CPU for big datasets (100k+ rows). Forest CoverType (~580k rows) makes that
+# MAGIC speedup tangible, and its columns are already numeric, so there is **no feature engineering**
+# MAGIC — a clean, realistic tabular classification problem. Step 02 shows how to put many GPUs to
+# MAGIC work for classic ML via parallel hyperparameter search.
 # MAGIC
 # MAGIC ## How to run this notebook
 # MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (a single-GPU
@@ -41,8 +42,8 @@
 # MAGIC %md
 # MAGIC ## 2. Configuration
 # MAGIC Every knob is an environment variable with a sensible default. In the notebook you can set
-# MAGIC one before running, e.g. `import os; os.environ["NUM_TRAIN_SAMPLES"] = "1000000"`. (The CLI
-# MAGIC form sets them in the workload YAML — see `02_cli/train_singlegpu.yaml`.)
+# MAGIC one before running, e.g. `import os; os.environ["MAX_SAMPLES"] = "50000"` for a quick smoke
+# MAGIC test. (The CLI form sets them in the workload YAML — see `02_cli/train_singlegpu.yaml`.)
 
 # COMMAND ----------
 
@@ -57,18 +58,18 @@ def _env(name: str, default: str) -> str:
 
 @dataclass
 class Config:
-    # Dataset generation --------------------------------------------------
-    # Synthetic dataset: 500k rows × 100 features × 2 classes (binary classification).
-    # For smoke tests, reduce NUM_TRAIN_SAMPLES to 10000 and NUM_TEST_SAMPLES to 1000.
-    num_train_samples: int = int(_env("NUM_TRAIN_SAMPLES", "500000"))
-    num_test_samples: int = int(_env("NUM_TEST_SAMPLES", "100000"))
-    num_features: int = int(_env("NUM_FEATURES", "100"))
-    num_classes: int = int(_env("NUM_CLASSES", "2"))
+    # Dataset --------------------------------------------------------------
+    # Forest CoverType (sklearn): 581,012 rows x 54 numeric features, 7 forest-cover-type classes.
+    # Downloaded on first use and cached under ~/scikit-learn_data. Every column is already numeric
+    # (10 continuous cartographic measures + 44 binary indicators), so no feature engineering is
+    # needed. Set MAX_SAMPLES to a small number for a quick smoke test.
+    test_size: float = float(_env("TEST_SIZE", "0.2"))
+    max_samples: int = int(_env("MAX_SAMPLES", "-1"))  # -1 = use all rows
     random_state: int = int(_env("RANDOM_STATE", "42"))
 
     # XGBoost hyperparameters ------------------------------------
-    n_estimators: int = int(_env("N_ESTIMATORS", "100"))
-    max_depth: int = int(_env("MAX_DEPTH", "7"))
+    n_estimators: int = int(_env("N_ESTIMATORS", "200"))
+    max_depth: int = int(_env("MAX_DEPTH", "8"))
     learning_rate: float = float(_env("LEARNING_RATE", "0.1"))
     subsample: float = float(_env("SUBSAMPLE", "0.8"))
     colsample_bytree: float = float(_env("COLSAMPLE_BYTREE", "0.8"))
@@ -100,43 +101,45 @@ print(CFG)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Generate synthetic dataset
-# MAGIC We generate a large balanced binary classification dataset with sklearn. The dataset is
-# MAGIC random but reproducible (via random_state). For a production model, replace this with
-# MAGIC your own data loaded from a UC table or external source.
+# MAGIC ## 3. Download the dataset
+# MAGIC We download the public **Forest CoverType** dataset via scikit-learn (cached locally after
+# MAGIC the first run) and split it into train/test. The source labels are 1..7; XGBoost multi-class
+# MAGIC expects 0..6, so we shift them by one. The split is deterministic (fixed `TEST_SIZE` +
+# MAGIC `RANDOM_STATE`), so batch inference (03) can regenerate the identical held-out split. For a
+# MAGIC production model, swap this cell for your own data loaded from a UC table.
 
 # COMMAND ----------
 
 import numpy as np
-from sklearn.datasets import make_classification
+from sklearn.datasets import fetch_covtype
 from sklearn.model_selection import train_test_split
 
 
-def generate_dataset(cfg: Config):
-    """Generate a synthetic classification dataset."""
-    print(f"Generating {cfg.num_train_samples + cfg.num_test_samples} synthetic samples...")
-    X, y = make_classification(
-        n_samples=cfg.num_train_samples + cfg.num_test_samples,
-        n_features=cfg.num_features,
-        n_informative=max(2, cfg.num_features // 2),
-        n_redundant=max(0, cfg.num_features // 4),
-        n_classes=cfg.num_classes,
-        shuffle=False,  # deterministic column order so train/infer distributions match
-        random_state=cfg.random_state,
-    )
+def load_dataset(cfg: Config):
+    """Download the Forest CoverType dataset and split it into train/test."""
+    print("Downloading Forest CoverType (~11 MB, cached under ~/scikit-learn_data)...")
+    data = fetch_covtype()
+    X = data.data.astype(np.float32)
+    y = (data.target - 1).astype(np.int32)  # 1..7 -> 0..6
+
+    if 0 < cfg.max_samples < len(X):
+        # Deterministic, class-covering subsample for smoke tests (same subset in 01 and 03).
+        idx = np.sort(np.random.default_rng(cfg.random_state).permutation(len(X))[: cfg.max_samples])
+        X, y = X[idx], y[idx]
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=cfg.num_test_samples / (cfg.num_train_samples + cfg.num_test_samples),
-        random_state=cfg.random_state,
+        X, y, test_size=cfg.test_size, random_state=cfg.random_state, stratify=y,
     )
-    print(f"Train: {X_train.shape}, Test: {X_test.shape}")
+    print(f"Train: {X_train.shape}, Test: {X_test.shape}, classes: {int(y.max()) + 1}")
     return X_train, X_test, y_train, y_test
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Train XGBoost on GPU
-# MAGIC We train with `tree_method="hist"` + `device="cuda"` (XGBoost 2.x GPU switch), which
-# MAGIC delivers a large speedup over CPU for big datasets. `main()` falls back to CPU if no GPU.
+# MAGIC We train with `tree_method="hist"` + `device="cuda"` (the XGBoost 2.x GPU switch) using the
+# MAGIC `multi:softprob` objective, which outputs a per-class probability matrix. `main()` falls back
+# MAGIC to CPU if no GPU is attached.
 
 # COMMAND ----------
 
@@ -144,12 +147,14 @@ import xgboost as xgb
 
 
 def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
-    """Train XGBoost classifier on GPU or CPU."""
+    """Train an XGBoost multi-class classifier on GPU (or CPU if no GPU is present)."""
     import time
     import torch
 
     device = cfg.device if torch.cuda.is_available() else "cpu"
     print(f"CUDA available: {torch.cuda.is_available()} -> training on device={device}")
+
+    num_class = int(y_train.max()) + 1
 
     # QuantileDMatrix is the memory-efficient structure for GPU "hist"; it builds the
     # histogram bins directly on the device.
@@ -157,9 +162,9 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
     dtest = xgb.QuantileDMatrix(X_test, label=y_test, ref=dtrain)
 
     params = {
-        "objective": "binary:logistic" if cfg.num_classes == 2 else "multi:softmax",
-        "num_class": cfg.num_classes if cfg.num_classes > 2 else None,
-        "eval_metric": "logloss" if cfg.num_classes == 2 else "mlogloss",
+        "objective": "multi:softprob",  # per-class probability matrix (n_rows, num_class)
+        "num_class": num_class,
+        "eval_metric": "mlogloss",
         "max_depth": cfg.max_depth,
         "learning_rate": cfg.learning_rate,
         "subsample": cfg.subsample,
@@ -167,8 +172,6 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
         "tree_method": cfg.tree_method,
         "device": device,  # "cuda" runs the whole boosting on the GPU (XGBoost 2.x API).
     }
-    # Remove None values to avoid XGBoost warnings.
-    params = {k: v for k, v in params.items() if v is not None}
 
     evals = [(dtrain, "train"), (dtest, "test")]
     evals_result = {}
@@ -186,44 +189,28 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
     train_time = time.time() - t0
 
     print(f"Training completed in {train_time:.1f}s")
-    print(f"Evals result: {evals_result}")
-
-    return booster, evals_result, train_time
+    return booster, num_class, train_time
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. Evaluate the model
-# MAGIC We compute accuracy and AUC (for binary) or multiclass AUC.
+# MAGIC We report accuracy, macro one-vs-rest AUC, and log loss on the held-out test split.
 
 # COMMAND ----------
 
 from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
 
 
-def evaluate_xgboost(cfg: Config, booster, X_test, y_test):
-    """Evaluate the trained model."""
-    dtest = xgb.DMatrix(X_test, label=y_test)
-    preds_proba = booster.predict(dtest)
-
-    # For binary classification, sklearn expects probabilities for the positive class.
-    if cfg.num_classes == 2:
-        preds_binary = (preds_proba > 0.5).astype(int)
-        accuracy = accuracy_score(y_test, preds_binary)
-        auc = roc_auc_score(y_test, preds_proba)
-        loss = log_loss(y_test, preds_proba)
-        return {
-            "accuracy": accuracy,
-            "auc": auc,
-            "log_loss": loss,
-        }
-    else:
-        # Multi-class: preds_proba is (n_samples,) with class indices.
-        preds = np.argmax(preds_proba, axis=-1) if len(preds_proba.shape) > 1 else preds_proba
-        accuracy = accuracy_score(y_test, preds)
-        return {
-            "accuracy": accuracy,
-        }
+def evaluate_xgboost(booster, X_test, y_test):
+    """Evaluate the trained multi-class model."""
+    proba = booster.predict(xgb.DMatrix(X_test))  # shape (n_rows, num_class)
+    preds = np.argmax(proba, axis=1)
+    return {
+        "accuracy": float(accuracy_score(y_test, preds)),
+        "auc_ovr_macro": float(roc_auc_score(y_test, proba, multi_class="ovr", average="macro")),
+        "log_loss": float(log_loss(y_test, proba)),
+    }
 
 # COMMAND ----------
 
@@ -231,17 +218,16 @@ def evaluate_xgboost(cfg: Config, booster, X_test, y_test):
 # MAGIC ## 6. Log to MLflow & register to Unity Catalog
 # MAGIC We log the trained XGBoost model with the MLflow `xgboost` flavor and register it
 # MAGIC directly to the **Unity Catalog Model Registry**, so it can be loaded for batch
-# MAGIC inference and deployed to Model Serving with no extra packaging code. Parameters and
-# MAGIC metrics are logged to the same MLflow run.
+# MAGIC inference with no extra packaging code. Parameters and metrics are logged to the same
+# MAGIC MLflow run, and the new version is promoted to the **`@champion`** alias.
 
 # COMMAND ----------
 
 import mlflow
 
 
-def log_and_register(cfg: Config, booster, metrics):
+def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
     """Log the model to MLflow and register to Unity Catalog."""
-    import numpy as np
     from mlflow.models.signature import infer_signature
 
     mlflow.set_registry_uri("databricks-uc")
@@ -250,8 +236,9 @@ def log_and_register(cfg: Config, booster, metrics):
     with mlflow.start_run(run_name="xgboost-classification-singlegpu", nested=nested) as run:
         mlflow.log_params(
             {
-                "num_train_samples": cfg.num_train_samples,
-                "num_features": cfg.num_features,
+                "dataset": "sklearn.fetch_covtype",
+                "num_features": X_train.shape[1],
+                "num_classes": num_class,
                 "n_estimators": cfg.n_estimators,
                 "max_depth": cfg.max_depth,
                 "learning_rate": cfg.learning_rate,
@@ -261,16 +248,10 @@ def log_and_register(cfg: Config, booster, metrics):
         )
         mlflow.log_metrics(metrics)
 
-        # Create an input example for signature inference (required for UC registration).
-        input_example = np.random.randn(1, cfg.num_features).astype(np.float32)
-        # Infer signature from input and a sample prediction.
-        dmatrix_example = xgb.DMatrix(input_example)
-        output_example = booster.predict(dmatrix_example)
-
-        signature = infer_signature(
-            model_input=input_example,
-            model_output=output_example,
-        )
+        # A real sample row makes the logged signature/input example match production inputs.
+        input_example = X_train[:5]
+        output_example = booster.predict(xgb.DMatrix(input_example))
+        signature = infer_signature(model_input=input_example, model_output=output_example)
 
         model_info = mlflow.xgboost.log_model(
             xgb_model=booster,
@@ -313,12 +294,12 @@ def main():
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-    X_train, X_test, y_train, y_test = generate_dataset(CFG)
-    booster, evals_result, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
-    metrics = evaluate_xgboost(CFG, booster, X_test, y_test)
+    X_train, X_test, y_train, y_test = load_dataset(CFG)
+    booster, num_class, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
+    metrics = evaluate_xgboost(booster, X_test, y_test)
     metrics["train_seconds"] = train_time
     print(f"Evaluation metrics: {metrics}")
-    run_id = log_and_register(CFG, booster, metrics)
+    run_id = log_and_register(CFG, booster, num_class, metrics, X_train)
     print(f"Done. MLflow run_id={run_id}")
     return metrics
 

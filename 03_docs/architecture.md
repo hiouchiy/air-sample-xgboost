@@ -3,18 +3,18 @@
 ## End-to-end flow
 
 ```
-   synthetic data ──► AI Runtime GPU node (serverless)
-   (sklearn)          │
-                      │  01 single-GPU (A10)      02 multi-GPU (8×H100)
-                      │  device="cuda" hist       parallel HPO: 1 trial per GPU
-                      │        │                        │  pick best by AUC
-                      │        ▼                        ▼
-                      │  MLflow run (params, metrics, model + register)
-                      └────────┼───────────────────────────────────────
-                               ▼
+   Forest CoverType ──► AI Runtime GPU node (serverless)
+   (sklearn download)  │
+                       │  01 single-GPU (A10)      02 multi-GPU (8×H100)
+                       │  device="cuda" hist       parallel HPO: 1 trial per GPU
+                       │        │                        │  pick best by AUC
+                       │        ▼                        ▼
+                       │  MLflow run (params, metrics, model + register)
+                       └────────┼───────────────────────────────────────
+                                ▼
                 Unity Catalog registered model
                 main.air_samples.xgboost_classification  (promoted to @champion)
-                               │
+                                │
                  03 GPU batch inference (AI Runtime GPU)
                  → predictions CSV on a UC Volume
 ```
@@ -24,9 +24,13 @@
 - **XGBoost** — the mainstream gradient-boosted decision tree library for tabular data. On XGBoost
   2.x, GPU training is selected with `tree_method="hist"` + `device="cuda"` (the old `gpu_hist`
   tree method and `gpu_id` are deprecated).
-- **Synthetic classification** — `sklearn.datasets.make_classification` generates a large, balanced,
-  reproducible dataset (default 500k×100). No network/HuggingFace dependency, so the demo is fully
-  self-contained. Swap in your own UC table for a real workload.
+- **Forest CoverType** (`sklearn.datasets.fetch_covtype`) — a public tabular dataset of 581,012 rows
+  × 54 numeric features (10 continuous cartographic measures + 44 binary indicators) and **7
+  forest-cover-type classes**. It downloads once (~11 MB, cached under `~/scikit-learn_data`) and
+  needs **no feature engineering** — every column is already numeric. Source labels are 1..7; we
+  shift them to 0..6 for XGBoost's multi-class objective. The train/test split is deterministic
+  (fixed `TEST_SIZE` + `RANDOM_STATE`), so batch inference (`03`) regenerates the identical held-out
+  split. Swap in your own UC table for a real workload.
 
 ## The two GPU modes for XGBoost — and which this repo uses
 
@@ -73,11 +77,14 @@ notebook markers.
    `mlflow.xgboost.log_model(..., registered_model_name="main.air_samples.xgboost_classification")`
    inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
    01/02 also promote the new version to the `@champion` alias, which 03 loads.
-3. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
+3. **The dataset downloads at job start** via `fetch_covtype` — the GPU node needs egress to the
+   scikit-learn data host (works on e2-demo-field-eng). In a locked-down workspace, pre-stage the
+   data in a UC Volume and point the loader at it instead.
+4. **macOS submitters:** prefix `air run` with `COPYFILE_DISABLE=1` to keep AppleDouble `._*` files
    out of the code snapshot.
-4. **`air logs` may report "No logs available"** even for successful runs; on e2 `air run --watch`
+5. **`air logs` may report "No logs available"** even for successful runs; on e2 `air run --watch`
    streams execution logs live. For debugging, write to a UC Volume.
-5. **No Spark on AI Runtime GPU nodes** — so batch inference (`03`) writes its predictions directly
+6. **No Spark on AI Runtime GPU nodes** — so batch inference (`03`) writes its predictions directly
    to a CSV on a UC Volume (`/Volumes/<catalog>/air_samples/predictions/`); it never invokes Spark.
 
 ## Files

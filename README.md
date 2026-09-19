@@ -1,10 +1,10 @@
 # AI Runtime sample: XGBoost GPU classification
 
 End-to-end **XGBoost GPU training, batch inference** on **Databricks AI Runtime**
-(serverless NVIDIA GPUs). It trains an **XGBoost classifier** on a large synthetic binary
-classification dataset (500k rows × 100 features) — demonstrating **GPU-accelerated gradient
-boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**, and runs
-**GPU batch inference** to predict on new data.
+(serverless NVIDIA GPUs). It trains an **XGBoost multi-class classifier** on the public **Forest
+CoverType** dataset (581,012 rows × 54 features, 7 classes) — demonstrating **GPU-accelerated
+gradient boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**, and
+runs **GPU batch inference** to predict on new data.
 
 > **Repo name is tentative** (`air-sample-xgboost`). AIR = AI Runtime.
 
@@ -128,18 +128,19 @@ Start with `01_train_singlegpu.py`, then `03_batch_inference.py`.
 |----------|---------|---------|
 | `UC_CATALOG` / `UC_SCHEMA` | `main` / `air_samples` | Unity Catalog target (matches Setup; change only to use another catalog) |
 | `REGISTERED_MODEL_NAME` | `xgboost_classification` | UC registered model name |
-| `NUM_TRAIN_SAMPLES` / `NUM_TEST_SAMPLES` | `500000` / `100000` | Dataset size; reduce for quick smoke tests |
-| `NUM_FEATURES` / `NUM_CLASSES` | `100` / `2` | Synthetic-data shape |
+| `TEST_SIZE` | `0.2` | Held-out test fraction of the CoverType dataset |
+| `MAX_SAMPLES` | `-1` | `-1` = all 581k rows; set a small number for a quick smoke test |
+| `RANDOM_STATE` | `42` | Split seed — must match between 01/02 and 03 |
 | `NUM_TRIALS` (02 only) | `16` | HPO trials; dispatched one-per-GPU across the node |
 | `N_ESTIMATORS`, `MAX_DEPTH`, `LEARNING_RATE` | see scripts | XGBoost hyper-parameters (02 samples these per trial) |
 | `TREE_METHOD` / `DEVICE` (01) | `hist` / `cuda` | XGBoost 2.x GPU switch is `device="cuda"`; auto-falls back to CPU |
 
-> **Keep `NUM_*` sample sizes and `RANDOM_STATE` the same across 01 and 03** — step 3 regenerates the
-> identical synthetic dataset and scores its held-out split, so mismatched sizes would score
+> **Keep `TEST_SIZE` and `RANDOM_STATE` the same across 01 and 03** — step 3 re-downloads Forest
+> CoverType and regenerates the identical held-out split, so mismatched values would score
 > out-of-distribution data. Both default to the same values, so the defaults just work.
 
 Override per run by prefixing the YAML `command:` line, e.g.
-`command: NUM_TRAIN_SAMPLES=100000 python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
+`command: MAX_SAMPLES=50000 python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
 
 ## Troubleshooting
 
@@ -147,7 +148,8 @@ Override per run by prefixing the YAML `command:` line, e.g.
 |---------|-------------|
 | Job dies in seconds, `cd: .../._xxx: Not a directory` | macOS AppleDouble files — always run with `COPYFILE_DISABLE=1` (see above). |
 | `RESOURCE_DOES_NOT_EXIST` / schema or volume not found | Run the Setup step (d); make sure `UC_CATALOG`/`UC_SCHEMA` match what you created. |
-| Step 3 accuracy looks random (~0.5) | 01 and 03 used different `NUM_TRAIN_SAMPLES`/`RANDOM_STATE` → different synthetic data. Keep them equal (defaults do). |
+| Step 3 accuracy looks off | 01 and 03 used different `TEST_SIZE`/`RANDOM_STATE` → different held-out split. Keep them equal (defaults do). |
+| Job fails downloading the dataset | The GPU node needs internet egress for `fetch_covtype`. In a locked-down workspace, pre-stage the data in a UC Volume and load from there. |
 | Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless. AI Runtime GPU nodes have no Spark; these lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore — 03 writes a CSV to the UC Volume. |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
 | Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). AI Runtime is US-region only for now. |

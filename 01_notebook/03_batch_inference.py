@@ -33,8 +33,8 @@
 # MAGIC %md
 # MAGIC ## 2. Configuration
 # MAGIC By default we load the registered UC model's **`@champion`** alias and score the held-out
-# MAGIC synthetic test split. Point `MODEL_URI` at a specific version or alias to score with a
-# MAGIC different model.
+# MAGIC test split. Keep `TEST_SIZE`/`RANDOM_STATE` equal to the training run so we regenerate the
+# MAGIC identical split. Point `MODEL_URI` at a specific version or alias to score a different model.
 
 # COMMAND ----------
 
@@ -51,20 +51,17 @@ class Config:
     uc_catalog: str = _env("UC_CATALOG", "main")
     uc_schema: str = _env("UC_SCHEMA", "air_samples")
     registered_model_name: str = _env("REGISTERED_MODEL_NAME", "xgboost_classification")
-    # Empty -> use models:/<catalog>.<schema>.<name>@champion or latest version.
+    # Empty -> use models:/<catalog>.<schema>.<name>@champion (else falls back to latest version).
     model_uri: str = _env("MODEL_URI", "")
 
-    # Test dataset generation ---
-    # To score data drawn from the SAME distribution the model was trained on, we regenerate the
-    # identical synthetic dataset (same n_samples total, shuffle=False, random_state) and take the
-    # held-out test split — matching 01_train_singlegpu.py exactly. (make_classification's per-
-    # cluster transforms depend on the RNG stream, so the total sample count must match training.)
-    num_train_samples: int = int(_env("NUM_TRAIN_SAMPLES", "500000"))
-    num_test_samples: int = int(_env("NUM_TEST_SAMPLES", "100000"))
-    num_features: int = int(_env("NUM_FEATURES", "100"))
-    num_classes: int = int(_env("NUM_CLASSES", "2"))
-    batch_size: int = int(_env("BATCH_SIZE", "10000"))
+    # Test data ---------------------------------------------------------
+    # We re-download Forest CoverType and take the SAME held-out test split as training. Because the
+    # split is deterministic (identical TEST_SIZE + RANDOM_STATE, matching 01/02), the model scores
+    # exactly the rows it did not train on — keep these values equal to the training run.
+    test_size: float = float(_env("TEST_SIZE", "0.2"))
+    max_samples: int = int(_env("MAX_SAMPLES", "-1"))
     random_state: int = int(_env("RANDOM_STATE", "42"))
+    batch_size: int = int(_env("BATCH_SIZE", "10000"))
 
     output_name: str = _env("OUTPUT_NAME", "xgboost_classification_predictions")
 
@@ -118,34 +115,34 @@ def load_model(cfg: Config):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Load input rows (synthetic or from UC table)
+# MAGIC ## 4. Load input rows — the held-out test split
+# MAGIC We re-download Forest CoverType and take the identical held-out split the model never trained
+# MAGIC on. For real scoring, replace this cell with your own rows loaded from a UC table.
 
 # COMMAND ----------
 
 import numpy as np
-from sklearn.datasets import make_classification
+from sklearn.datasets import fetch_covtype
+from sklearn.model_selection import train_test_split
 
 
 def load_inputs(cfg: Config):
-    """Regenerate the identical dataset used in training and return the held-out test split, so
-    the model scores in-distribution data (see the Config note)."""
-    from sklearn.model_selection import train_test_split
+    """Re-download Forest CoverType and return the identical held-out test split used in training,
+    so the model scores in-distribution data it never saw (see the Config note)."""
+    print("Downloading Forest CoverType (~11 MB, cached under ~/scikit-learn_data)...")
+    data = fetch_covtype()
+    X = data.data.astype(np.float32)
+    y = (data.target - 1).astype(np.int32)
 
-    total = cfg.num_train_samples + cfg.num_test_samples
-    print(f"Regenerating {total} samples; scoring the {cfg.num_test_samples}-row test split...")
-    X, y = make_classification(
-        n_samples=total,
-        n_features=cfg.num_features,
-        n_informative=max(2, cfg.num_features // 2),
-        n_redundant=max(0, cfg.num_features // 4),
-        n_classes=cfg.num_classes,
-        shuffle=False,  # deterministic column order so train/infer distributions match
-        random_state=cfg.random_state,
-    )
+    if 0 < cfg.max_samples < len(X):
+        idx = np.sort(np.random.default_rng(cfg.random_state).permutation(len(X))[: cfg.max_samples])
+        X, y = X[idx], y[idx]
+
     _, X_test, _, y_test = train_test_split(
-        X, y, test_size=cfg.num_test_samples / total, random_state=cfg.random_state,
+        X, y, test_size=cfg.test_size, random_state=cfg.random_state, stratify=y,
     )
-    return X_test.astype(np.float32), y_test
+    print(f"Scoring the {len(X_test)}-row held-out test split...")
+    return X_test, y_test
 
 # COMMAND ----------
 
@@ -158,18 +155,18 @@ import time
 import xgboost as xgb
 
 
-def run_inference(cfg: Config, booster, X_test):
+def run_inference(booster, X_test):
     """Run batch inference on GPU."""
     dtest = xgb.DMatrix(X_test)
 
     t0 = time.time()
-    preds_proba = booster.predict(dtest)
+    proba = booster.predict(dtest)  # shape (n_rows, num_class)
     elapsed = time.time() - t0
 
     throughput = len(X_test) / elapsed if elapsed > 0 else float("nan")
     print(f"Scored {len(X_test)} rows in {elapsed:.1f}s ({throughput:.0f} rows/s)")
 
-    return preds_proba, elapsed, throughput
+    return proba, elapsed, throughput
 
 # COMMAND ----------
 
@@ -179,17 +176,15 @@ def run_inference(cfg: Config, booster, X_test):
 
 # COMMAND ----------
 
-def persist(cfg: Config, X_test, preds_proba, y_test):
+def persist(cfg: Config, proba, y_test):
     import pandas as pd
 
-    rows = {"predicted_probability": preds_proba}
-    if cfg.num_classes == 2:
-        rows["predicted_class"] = (preds_proba > 0.5).astype(int)
-    else:
-        rows["predicted_class"] = np.argmax(preds_proba, axis=-1)
+    pdf = pd.DataFrame({
+        "predicted_class": np.argmax(proba, axis=1),
+        "predicted_probability": proba.max(axis=1),  # confidence of the predicted class
+    })
     if y_test is not None:
-        rows["true_label"] = y_test
-    pdf = pd.DataFrame(rows)
+        pdf["true_label"] = y_test
 
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
     os.makedirs(out_dir, exist_ok=True)
@@ -218,21 +213,17 @@ def main():
 
     nested = mlflow.active_run() is not None
     with mlflow.start_run(run_name="xgboost-classification-batch-inference", nested=nested):
-        preds_proba, elapsed, throughput = run_inference(CFG, booster, X_test)
+        proba, elapsed, throughput = run_inference(booster, X_test)
         mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(X_test)})
         mlflow.log_metric("inference_seconds", elapsed)
         mlflow.log_metric("rows_per_second", throughput)
 
         if y_test is not None:
-            if CFG.num_classes == 2:
-                preds = (preds_proba > 0.5).astype(int)
-            else:
-                preds = np.argmax(preds_proba, axis=-1)
-            acc = accuracy_score(y_test, preds)
+            acc = accuracy_score(y_test, np.argmax(proba, axis=1))
             mlflow.log_metric("accuracy", acc)
             print(f"Batch inference accuracy: {acc:.4f}")
 
-        target = persist(CFG, X_test, preds_proba, y_test)
+        target = persist(CFG, proba, y_test)
         print(f"Output: {target}")
 
 
