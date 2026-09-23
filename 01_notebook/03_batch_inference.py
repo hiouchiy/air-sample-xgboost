@@ -6,11 +6,21 @@
 # MAGIC (the `@champion` version) and runs **GPU batch inference** over the held-out test set on an
 # MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
 # MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
+# MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (`GPU_1xA10` is enough),
-# MAGIC and **Run All**. The `%pip` cell below installs the dependencies. Run `01` (or `02`) first — it
-# MAGIC registers the model and sets the `@champion` alias this step loads.
+# MAGIC Run `01` (or `02`) first — it registers the model and sets the `@champion` alias this step
+# MAGIC loads — then **Run All** here.
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/03_batch_inference.py` — run
 # MAGIC > it with `air run --file 02_cli/batch_inference.yaml --watch`.
@@ -18,7 +28,9 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -112,6 +124,11 @@ def load_model(cfg: Config):
     print(f"Inference device: {device}")
     return booster, uri
 
+
+# Run it: load the @champion model onto the GPU.
+print(f"CUDA available: {torch.cuda.is_available()}")
+booster, uri = load_model(CFG)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -144,15 +161,22 @@ def load_inputs(cfg: Config):
     print(f"Scoring the {len(X_test)}-row held-out test split...")
     return X_test, y_test
 
+
+# Run it.
+X_test, y_test = load_inputs(CFG)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. Run GPU batch inference
+# MAGIC Score the held-out rows on the GPU and log latency/throughput (and accuracy vs. the true
+# MAGIC labels) to an MLflow run.
 
 # COMMAND ----------
 
 import time
 import xgboost as xgb
+from sklearn.metrics import accuracy_score
 
 
 def run_inference(booster, X_test):
@@ -167,6 +191,19 @@ def run_inference(booster, X_test):
     print(f"Scored {len(X_test)} rows in {elapsed:.1f}s ({throughput:.0f} rows/s)")
 
     return proba, elapsed, throughput
+
+
+# Run it: score inside an MLflow run and log metrics.
+nested = mlflow.active_run() is not None
+with mlflow.start_run(run_name="xgboost-classification-batch-inference", nested=nested):
+    proba, elapsed, throughput = run_inference(booster, X_test)
+    mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(X_test)})
+    mlflow.log_metric("inference_seconds", elapsed)
+    mlflow.log_metric("rows_per_second", throughput)
+    if y_test is not None:
+        acc = accuracy_score(y_test, np.argmax(proba, axis=1))
+        mlflow.log_metric("accuracy", acc)
+        print(f"Batch inference accuracy: {acc:.4f}")
 
 # COMMAND ----------
 
@@ -193,41 +230,7 @@ def persist(cfg: Config, proba, y_test):
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")
     return path
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 7. Entry point
-
-# COMMAND ----------
-
-def main():
-    from sklearn.metrics import accuracy_score
-
-    mlflow.set_registry_uri("databricks-uc")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-
-    booster, uri = load_model(CFG)
-    X_test, y_test = load_inputs(CFG)
-
-    nested = mlflow.active_run() is not None
-    with mlflow.start_run(run_name="xgboost-classification-batch-inference", nested=nested):
-        proba, elapsed, throughput = run_inference(booster, X_test)
-        mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(X_test)})
-        mlflow.log_metric("inference_seconds", elapsed)
-        mlflow.log_metric("rows_per_second", throughput)
-
-        if y_test is not None:
-            acc = accuracy_score(y_test, np.argmax(proba, axis=1))
-            mlflow.log_metric("accuracy", acc)
-            print(f"Batch inference accuracy: {acc:.4f}")
-
-        target = persist(CFG, proba, y_test)
-        print(f"Output: {target}")
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it.
+target = persist(CFG, proba, y_test)
+print("Output:", target)

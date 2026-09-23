@@ -10,24 +10,32 @@
 # MAGIC ## Why XGBoost on GPU?
 # MAGIC XGBoost on GPU (`tree_method="hist"` + `device="cuda"`, the XGBoost 2.x API) delivers a large
 # MAGIC speedup over CPU for big datasets (100k+ rows). Forest CoverType (~580k rows) makes that
-# MAGIC speedup tangible, and its columns are already numeric, so there is **no feature engineering**
-# MAGIC — a clean, realistic tabular classification problem. Step 02 shows how to put many GPUs to
-# MAGIC work for classic ML via parallel hyperparameter search.
-# MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace, attach it to an **AI Runtime** compute (a single-GPU
-# MAGIC `GPU_1xA10` is enough), and **Run All**. The `# MAGIC %pip` cells below install the
-# MAGIC dependencies. All behaviour is controlled by environment variables (see the `Config` cell).
-# MAGIC
-# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/01_train_singlegpu.py` —
-# MAGIC > run it with `air run --file 02_cli/train_singlegpu.yaml` (dependencies come from that YAML).
+# MAGIC speedup tangible, and its columns are already numeric, so no feature engineering is needed.
+# MAGIC Step 02 shows how to put many GPUs to work for classic ML via parallel hyperparameter search.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
-# MAGIC These `%pip`/`%restart_python` magics run **only** when the file is opened as a
-# MAGIC notebook. Under the AI Runtime CLI the dependencies are declared in the workload YAML.
+# MAGIC ## ▶ Before you Run All — attach a serverless GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
+# MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
+# MAGIC
+# MAGIC Then **Run All** — the steps below execute top to bottom and show their output as you go.
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
+# MAGIC
+# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/01_train_singlegpu.py` —
+# MAGIC > run it with `air run --file 02_cli/train_singlegpu.yaml`.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -77,7 +85,7 @@ class Config:
     # GPU configuration -----------------------------------------------
     # XGBoost 2.x selects the GPU via device="cuda" (the old "gpu_hist" tree method and
     # "gpu_id" are deprecated). tree_method stays "hist"; the device does the GPU switch.
-    # main() downgrades device to "cpu" automatically if no CUDA device is present.
+    # train_xgboost() downgrades device to "cpu" automatically if no CUDA device is present.
     tree_method: str = _env("TREE_METHOD", "hist")
     device: str = _env("DEVICE", "cuda")
 
@@ -133,13 +141,17 @@ def load_dataset(cfg: Config):
     print(f"Train: {X_train.shape}, Test: {X_test.shape}, classes: {int(y.max()) + 1}")
     return X_train, X_test, y_train, y_test
 
+
+# Run it: download CoverType and split into train/test.
+X_train, X_test, y_train, y_test = load_dataset(CFG)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Train XGBoost on GPU
 # MAGIC We train with `tree_method="hist"` + `device="cuda"` (the XGBoost 2.x GPU switch) using the
-# MAGIC `multi:softprob` objective, which outputs a per-class probability matrix. `main()` falls back
-# MAGIC to CPU if no GPU is attached.
+# MAGIC `multi:softprob` objective, which outputs a per-class probability matrix. It falls back to
+# MAGIC CPU automatically if no GPU is attached.
 
 # COMMAND ----------
 
@@ -191,6 +203,10 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
     print(f"Training completed in {train_time:.1f}s")
     return booster, num_class, train_time
 
+
+# Run it: train on the GPU.
+booster, num_class, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -212,14 +228,19 @@ def evaluate_xgboost(booster, X_test, y_test):
         "log_loss": float(log_loss(y_test, proba)),
     }
 
+
+# Run it.
+metrics = evaluate_xgboost(booster, X_test, y_test)
+metrics["train_seconds"] = train_time
+print("Evaluation metrics:", metrics)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 6. Log to MLflow & register to Unity Catalog
-# MAGIC We log the trained XGBoost model with the MLflow `xgboost` flavor and register it
-# MAGIC directly to the **Unity Catalog Model Registry**, so it can be loaded for batch
-# MAGIC inference with no extra packaging code. Parameters and metrics are logged to the same
-# MAGIC MLflow run, and the new version is promoted to the **`@champion`** alias.
+# MAGIC We log the trained XGBoost model with the MLflow `xgboost` flavor and register it directly to
+# MAGIC the **Unity Catalog Model Registry**. Parameters and metrics are logged to the same MLflow
+# MAGIC run, and the new version is promoted to the **`@champion`** alias.
 
 # COMMAND ----------
 
@@ -277,34 +298,7 @@ def _promote_to_champion(cfg: Config, model_info):
     print(f"Registered {cfg.uc_model_fqn} as version {version} and set alias @champion "
           f"(this is the version 03 will load).")
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 7. Entry point
-# MAGIC `main()` wires the steps together. The single `if __name__ == "__main__"` guard below
-# MAGIC fires in **both** modes: Databricks notebooks expose `__name__ == "__main__"`, so
-# MAGIC *Run All* triggers it, and the AI Runtime CLI runs the file as a script
-# MAGIC (`python .../01_train_singlegpu.py`), which triggers it too — exactly once each way.
-
-# COMMAND ----------
-
-def main():
-    import torch
-
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-    X_train, X_test, y_train, y_test = load_dataset(CFG)
-    booster, num_class, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
-    metrics = evaluate_xgboost(booster, X_test, y_test)
-    metrics["train_seconds"] = train_time
-    print(f"Evaluation metrics: {metrics}")
-    run_id = log_and_register(CFG, booster, num_class, metrics, X_train)
-    print(f"Done. MLflow run_id={run_id}")
-    return metrics
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it: log params/metrics/model and promote to @champion.
+run_id = log_and_register(CFG, booster, num_class, metrics, X_train)
+print("MLflow run_id:", run_id)

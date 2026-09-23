@@ -17,12 +17,21 @@
 # MAGIC (Data-parallel single-model training across GPUs — `xgboost.dask` + Dask-CUDA — is the other
 # MAGIC multi-GPU mode, reserved for datasets too large for one GPU; on AI Runtime it needs a custom
 # MAGIC RAPIDS image, whereas this parallel-HPO pattern runs on the stock environment.)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ▶ Before you Run All — attach a serverless 8×H100 GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. For 8-way parallelism this
+# MAGIC notebook wants a **`GPU_8xH100`** node (it parallelizes over whatever GPUs are attached, so a
+# MAGIC 1-GPU compute also works — the trials just run sequentially). Attach one from the notebook:
+# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
+# MAGIC 3. Set **Accelerator** to **8xH100** (`GPU_8xH100`); leave the default **Base environment**.
+# MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC ## How to run this notebook
-# MAGIC Import it into the workspace and **Run All**. It parallelizes over **whatever GPUs are
-# MAGIC attached** (`torch.cuda.device_count()` with a thread pool), so attach a **`GPU_8xH100`** AI
-# MAGIC Runtime compute to get 8-way parallelism. It still runs on a 1-GPU compute — the trials just
-# MAGIC run sequentially. The `%pip` cell below installs the dependencies.
+# MAGIC Then **Run All** — the steps below execute top to bottom and show their output as you go.
+# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/02_train_multigpu.py` — run
 # MAGIC > it with `air run --file 02_cli/train_multigpu.yaml --watch`.
@@ -30,7 +39,9 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. Install dependencies (notebook only)
+# MAGIC ## 1. Install dependencies
+# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
+# MAGIC gets them from its workload YAML instead.)
 
 # COMMAND ----------
 
@@ -44,6 +55,8 @@
 
 # MAGIC %md
 # MAGIC ## 2. Configuration
+# MAGIC Env-var-driven config (the same dataset knobs as `01`, plus `NUM_TRIALS`). Set an env var
+# MAGIC before running, or edit the `Config` cell.
 
 # COMMAND ----------
 
@@ -112,10 +125,17 @@ def load_dataset(cfg: Config):
     print(f"Train: {X_train.shape}, Test: {X_test.shape}, classes: {int(y.max()) + 1}")
     return X_train, X_test, y_train, y_test
 
+
+# Run it: download once; all trials share this split.
+data = load_dataset(CFG)
+num_class = int(data[2].max()) + 1  # y_train
+num_features = data[0].shape[1]     # X_train
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Sample the hyperparameter grid
+# MAGIC Draw `NUM_TRIALS` reproducible random hyperparameter combinations — one candidate per GPU.
 
 # COMMAND ----------
 
@@ -201,10 +221,19 @@ def run_hpo(cfg: Config, data, num_class):
     results.sort(key=lambda r: r["auc"], reverse=True)
     return results, wall, n_gpu
 
+
+# Run it: train all trials, one per GPU, concurrently.
+import torch
+
+print(f"CUDA available: {torch.cuda.is_available()} | GPUs: {torch.cuda.device_count()}")
+results, wall, n_gpu = run_hpo(CFG, data, num_class)
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 6. Log all trials to MLflow & register the best model to Unity Catalog
+# MAGIC Every trial is logged as a nested MLflow run for side-by-side comparison; the best booster
+# MAGIC (by validation AUC) is registered to Unity Catalog and promoted to the **`@champion`** alias.
 
 # COMMAND ----------
 
@@ -260,27 +289,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, num_features):
                   f"(this is the version 03 will load).")
         return run.info.run_id
 
-# COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 7. Entry point
-
-# COMMAND ----------
-
-def main():
-    import torch
-
-    print(f"CUDA available: {torch.cuda.is_available()} | GPUs: {torch.cuda.device_count()}")
-    data = load_dataset(CFG)
-    num_class = int(data[2].max()) + 1  # y_train
-    num_features = data[0].shape[1]     # X_train
-    results, wall, n_gpu = run_hpo(CFG, data, num_class)
-    run_id = log_and_register(CFG, results, wall, n_gpu, num_features)
-    print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")
-    return results[0]
-
-
-# COMMAND ----------
-
-if __name__ == "__main__":
-    main()
+# Run it: log every trial and register the best model as @champion.
+run_id = log_and_register(CFG, results, wall, n_gpu, num_features)
+print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")
