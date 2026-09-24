@@ -136,6 +136,25 @@ Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a
 GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints "No logs available" even
 for successful runs; trust `Job status` and the MLflow links.)
 
+## Appendix — parallel HPO across cheap A10s (`fanout_hpo.py`)
+
+Step 2 defaults to a **single A10** (trials sequential) and can scale to a **`GPU_8xH100`** node
+(one trial per GPU) by overriding the accelerator. A third option sits in between: since HPO is
+embarrassingly parallel, you can **fan the trials across N separate single-`GPU_1xA10` jobs** —
+A10 cost with wall-clock parallelism. `02_cli/fanout_hpo.py` is a control-plane orchestrator (no GPU
+itself) that shards the trial grid, submits N `air run` jobs, waits, and promotes the **global best**
+to `@champion`:
+
+```bash
+pip install -r requirements.txt          # the orchestrator needs `mlflow` locally (like 04 in BERT)
+NUM_WORKERS=2 TRIAL_TOTAL=8 python 02_cli/fanout_hpo.py --profile air
+```
+
+**Which to use?** At this dataset's scale a trial takes seconds while GPU startup takes minutes, so a
+single A10 (the default) is usually cheapest; fan-out and 8×H100 pay off as trials get
+larger/longer. Measure `time × per-accelerator rate` (see the notebook's tier note) rather than
+guessing.
+
 ## Configuration (env vars, with defaults)
 
 | Variable | Default | Meaning |
@@ -180,7 +199,8 @@ air-sample-xgboost/
 │   ├── 01_train_singlegpu.py … 03_batch_inference.py
 │   ├── train_singlegpu.yaml
 │   ├── train_multigpu.yaml
-│   └── batch_inference.yaml
+│   ├── batch_inference.yaml
+│   └── fanout_hpo.py          # (optional) control-plane orchestrator: parallel HPO across N A10 jobs
 ├── 03_docs/                   # architecture walkthrough & AI Runtime notes
 │   └── architecture.md
 ├── setup.sh                   # one-time UC schema + volume creation

@@ -36,6 +36,12 @@ class Config:
     # Number of hyperparameter trials. Defaults to 2x the GPU count so every GPU does real work.
     num_trials: int = int(_env("NUM_TRIALS", "16"))
 
+    # Fan-out sharding (used by the A10 fan-out orchestrator, fanout_hpo.py): run a slice of a
+    # shared grid across N single-A10 jobs. Defaults make a normal single-job run (all num_trials).
+    trial_total: int = int(_env("TRIAL_TOTAL", "0"))   # 0 -> use num_trials (single job / in-node)
+    trial_start: int = int(_env("TRIAL_START", "0"))   # this job's offset into the shared grid
+    fanout_tag: str = _env("FANOUT_TAG", "")           # set by the orchestrator; defers @champion
+
     # Dataset (Forest CoverType — see 01_train_singlegpu.py) ---------------
     test_size: float = float(_env("TEST_SIZE", "0.2"))
     max_samples: int = int(_env("MAX_SAMPLES", "-1"))  # -1 = use all rows
@@ -92,10 +98,10 @@ def sample_hyperparameters(cfg: Config):
         "min_child_weight": [1, 3, 5, 7],
         "reg_lambda": [0.5, 1.0, 2.0, 5.0],
     }
-    trials = []
-    for _ in range(cfg.num_trials):
-        trials.append({k: type(v[0])(rng.choice(v)) for k, v in space.items()})
-    return trials
+    total = cfg.trial_total or cfg.num_trials
+    grid = [{k: type(v[0])(rng.choice(v)) for k, v in space.items()} for _ in range(total)]
+    # This job runs its slice of the shared grid (fan-out); defaults return all num_trials.
+    return grid[cfg.trial_start : cfg.trial_start + cfg.num_trials]
 
 
 import time
@@ -147,7 +153,7 @@ def run_hpo(cfg: Config, data, num_class):
         futures = {
             pool.submit(_train_one_trial, i, p, (i % n_gpu if use_gpu else 0),
                         cfg, data, num_class, use_gpu): i
-            for i, p in enumerate(trials)
+            for i, p in enumerate(trials, cfg.trial_start)
         }
         for fut, i in futures.items():
             try:
@@ -206,13 +212,24 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
         print("Best trial:", {k: best[k] for k in ("trial", "gpu", "auc", "accuracy", "params")})
         print("Logged model:", info.model_uri)
         if cfg.register_model:
-            from mlflow.tracking import MlflowClient
-
             v = info.registered_model_version
-            MlflowClient().set_registered_model_alias(
-                cfg.uc_model_fqn, "champion", v)
-            print(f"Registered {cfg.uc_model_fqn} version {v} and set alias @champion "
-                  f"(this is the version 03 will load).")
+            if cfg.fanout_tag:
+                # Fan-out worker: record this version + its best AUC as a JSON on the UC Volume; the
+                # orchestrator (fanout_hpo.py) reads all workers' results and promotes the global best.
+                import json
+
+                out = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
+                path = f"{out}/_fanout__{cfg.fanout_tag}__{cfg.trial_start}.json"
+                with open(path, "w") as fh:
+                    json.dump({"version": int(v), "auc": float(best["auc"])}, fh)
+                print(f"Fan-out worker: registered v{v} (auc={best['auc']:.4f}); wrote {path}. "
+                      f"@champion promotion is deferred to the orchestrator.")
+            else:
+                from mlflow.tracking import MlflowClient
+
+                MlflowClient().set_registered_model_alias(cfg.uc_model_fqn, "champion", v)
+                print(f"Registered {cfg.uc_model_fqn} version {v} and set alias @champion "
+                      f"(this is the version 03 will load).")
         return run.info.run_id
 
 
