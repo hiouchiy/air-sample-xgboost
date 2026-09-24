@@ -8,10 +8,15 @@
 # MAGIC with **MLflow**, and registers the trained model to **Unity Catalog** for batch inference.
 # MAGIC
 # MAGIC ## Why XGBoost on GPU?
-# MAGIC XGBoost on GPU (`tree_method="hist"` + `device="cuda"`, the XGBoost 2.x API) delivers a large
-# MAGIC speedup over CPU for big datasets (100k+ rows). Forest CoverType (~580k rows) makes that
-# MAGIC speedup tangible, and its columns are already numeric, so no feature engineering is needed.
-# MAGIC Step 02 shows how to put many GPUs to work for classic ML via parallel hyperparameter search.
+# MAGIC XGBoost on GPU (`tree_method="hist"` + `device="cuda"`, the XGBoost 2.x/3.x API) speeds up
+# MAGIC training on big datasets (100k+ rows). Rather than assert a number, this notebook **measures**
+# MAGIC it on the data you're running: the *(optional)* benchmark cell after training reports the
+# MAGIC GPU-vs-CPU ratio **on this dataset and this compute** (hardware- and size-dependent). Forest
+# MAGIC CoverType's columns are already numeric, so no feature engineering is needed. Step 02 shows how
+# MAGIC to put many GPUs to work for classic ML via parallel hyperparameter search.
+# MAGIC
+# MAGIC References: [XGBoost GPU support](https://xgboost.readthedocs.io/en/stable/gpu/) ·
+# MAGIC [UCI Covertype dataset](https://archive.ics.uci.edu/dataset/31/covertype).
 
 # COMMAND ----------
 
@@ -77,6 +82,15 @@ logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 # Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
 logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
 logging.getLogger("py4j").setLevel(logging.ERROR)
+
+
+# Notebook widget for the UC catalog/schema — set a catalog where you can CREATE schemas/volumes/
+# models (`main` is often locked down in governed workspaces). Runs before Config reads the env.
+# Notebook-only; the CLI copy takes these from the workload YAML / env instead.
+dbutils.widgets.text("UC_CATALOG", "main", "Unity Catalog (must have CREATE)")
+dbutils.widgets.text("UC_SCHEMA", "air_samples", "Schema")
+os.environ["UC_CATALOG"] = dbutils.widgets.get("UC_CATALOG")
+os.environ["UC_SCHEMA"] = dbutils.widgets.get("UC_SCHEMA")
 
 
 def _env(name: str, default: str) -> str:
@@ -168,6 +182,23 @@ X_train, X_test, y_train, y_test = load_dataset(CFG)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Peek at the data
+# MAGIC A few rows (label + the 54 numeric features) and the class balance, so the task is concrete
+# MAGIC before we train (CoverType is imbalanced across its 7 cover-type classes).
+
+# COMMAND ----------
+
+import pandas as pd
+
+_prev = pd.DataFrame(X_train[:5], columns=[f"f{i}" for i in range(X_train.shape[1])])
+_prev.insert(0, "label", y_train[:5])
+display(_prev)  # display() renders a rich table on Databricks
+_u, _c = np.unique(y_train, return_counts=True)
+print("class distribution (0..6):", dict(zip(_u.tolist(), _c.tolist())))
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 4. Train XGBoost on GPU
 # MAGIC We train with `tree_method="hist"` + `device="cuda"` (the XGBoost 2.x GPU switch) using the
 # MAGIC `multi:softprob` objective, which outputs a per-class probability matrix. It falls back to
@@ -221,11 +252,43 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
     train_time = time.time() - t0
 
     print(f"Training completed in {train_time:.1f}s")
-    return booster, num_class, train_time
+    return booster, num_class, train_time, evals_result
 
 
 # Run it: train on the GPU.
-booster, num_class, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
+booster, num_class, train_time, evals_result = train_xgboost(CFG, X_train, X_test, y_train, y_test)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### (Optional) Measured GPU vs CPU speedup
+# MAGIC Trains the same config on GPU then CPU on a 100k subsample and prints the **measured** ratio —
+# MAGIC concrete for this dataset/hardware, not an unsourced "Nx". Skip it to keep the run fast.
+
+# COMMAND ----------
+
+import time as _t
+
+_Xd, _yd = X_train[:100_000], y_train[:100_000]
+_base = dict(objective="multi:softprob", num_class=num_class, eval_metric="mlogloss",
+             max_depth=CFG.max_depth, learning_rate=CFG.learning_rate, tree_method="hist")
+
+
+def _bench(device):
+    _d = xgb.QuantileDMatrix(_Xd, label=_yd)
+    _s = _t.time()
+    xgb.train({**_base, "device": device}, _d, num_boost_round=CFG.n_estimators)
+    return _t.time() - _s
+
+
+import torch
+
+if torch.cuda.is_available():
+    _g, _c = _bench("cuda"), _bench("cpu")
+    print(f"GPU {_g:.1f}s vs CPU {_c:.1f}s -> {_c / _g:.1f}x faster "
+          f"({len(_Xd)}x{X_train.shape[1]} rows, {CFG.n_estimators} rounds, on this compute)")
+else:
+    print("No GPU attached; skipping the GPU-vs-CPU benchmark.")
 
 # COMMAND ----------
 
@@ -267,7 +330,7 @@ print("Evaluation metrics:", metrics)
 import mlflow
 
 
-def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
+def log_and_register(cfg: Config, booster, num_class, metrics, X_train, evals_result):
     """Log the model to MLflow and register to Unity Catalog."""
     from mlflow.models.signature import infer_signature
 
@@ -288,6 +351,12 @@ def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
             }
         )
         mlflow.log_metrics(metrics)
+
+        # Per-round boosting curves (train/test mlogloss) -> the MLflow experiment-tracking value.
+        tr = evals_result.get("train", {}).get("mlogloss", [])
+        te = evals_result.get("test", {}).get("mlogloss", [])
+        for i, (a, b) in enumerate(zip(tr, te)):
+            mlflow.log_metrics({"train_mlogloss": a, "test_mlogloss": b}, step=i)
 
         # A real sample row makes the logged signature/input example match production inputs.
         input_example = X_train[:5]
@@ -320,5 +389,5 @@ def _promote_to_champion(cfg: Config, model_info):
 
 
 # Run it: log params/metrics/model and promote to @champion.
-run_id = log_and_register(CFG, booster, num_class, metrics, X_train)
+run_id = log_and_register(CFG, booster, num_class, metrics, X_train, evals_result)
 print("MLflow run_id:", run_id)

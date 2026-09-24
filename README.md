@@ -79,14 +79,37 @@ databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 ## Point the demo at your catalog
 
 The scripts default to catalog **`main`**, schema **`air_samples`** — the same values the Setup
-step creates. **If you ran Setup with `CATALOG=main`, everything runs unchanged.** To use a
-different catalog, set `UC_CATALOG` either way:
+step creates. **`main` works in many demo workspaces but is often locked down (no `CREATE`) in
+governed ones** — pick a catalog where you can create schemas/volumes/models. Set it:
 
+- **Notebook (recommended):** use the **`UC_CATALOG` / `UC_SCHEMA` widgets** at the top of the
+  notebook — no code edit, and it runs before anything else. Or
 - edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each script, or
 - prefix the YAML `command:` line, e.g.
   `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
+
+## Run it as a notebook (`01_notebook/`)
+
+Import a file from `01_notebook/` into your Databricks workspace (**Workspace → Import → File**),
+then **attach a serverless AI Runtime GPU** — there is no cluster to create:
+
+1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
+2. Click the **environment** icon to open the **Environment** side panel.
+3. Set **Accelerator** (`GPU_1xA10` for 01/03; **`GPU_8xH100`** for `02_train_multigpu.py`) and
+   leave the default **Base environment**.
+4. Click **Apply**, then **Confirm**.
+
+Then **run the cells one at a time, top to bottom**, reviewing each step's output (Run All works too). The `%pip` cells install
+dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_inference.py`. See
+[Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
+
+- `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
+  with a thread pool), so attach a **`GPU_8xH100`** AI Runtime compute to get 8-way parallelism. It
+  still runs on a 1-GPU compute (trials just run sequentially).
+- The **first** run waits several minutes (~5 min on A10, ~7 min on 8×H100) for GPU capacity before
+  any cell executes — that's normal cold start, not a hang.
 
 ## Run it via the CLI (`02_cli/`) — do the steps in order
 
@@ -109,27 +132,6 @@ COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile 
 Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a few minutes for a
 GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints "No logs available" even
 for successful runs; trust `Job status` and the MLflow links.)
-
-## Run it as a notebook (`01_notebook/`)
-
-Import a file from `01_notebook/` into your Databricks workspace (**Workspace → Import → File**),
-then **attach a serverless AI Runtime GPU** — there is no cluster to create:
-
-1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
-2. Click the **environment** icon to open the **Environment** side panel.
-3. Set **Accelerator** (`GPU_1xA10` for 01/03; **`GPU_8xH100`** for `02_train_multigpu.py`) and
-   leave the default **Base environment**.
-4. Click **Apply**, then **Confirm**.
-
-Then **run the cells one at a time, top to bottom**, reviewing each step's output (Run All works too). The `%pip` cells install
-dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_inference.py`. See
-[Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
-
-- `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
-  with a thread pool), so attach a **`GPU_8xH100`** AI Runtime compute to get 8-way parallelism. It
-  still runs on a 1-GPU compute (trials just run sequentially).
-- The **first** run waits several minutes (~5 min on A10, ~7 min on 8×H100) for GPU capacity before
-  any cell executes — that's normal cold start, not a hang.
 
 ## Configuration (env vars, with defaults)
 

@@ -17,6 +17,16 @@
 # MAGIC (Data-parallel single-model training across GPUs — `xgboost.dask` + Dask-CUDA — is the other
 # MAGIC multi-GPU mode, reserved for datasets too large for one GPU; on AI Runtime it needs a custom
 # MAGIC RAPIDS image, whereas this parallel-HPO pattern runs on the stock environment.)
+# MAGIC
+# MAGIC ### Choosing the GPU tier — 8×H100 vs A10 (cost-performance)
+# MAGIC This dataset is **small for a GPU** (~581k×54; a trial finishes in seconds), so an H100 is
+# MAGIC under-utilized and its edge over an A10 here is modest. Because HPO is embarrassingly parallel,
+# MAGIC the cost-effective alternative is often to **fan out N single-`GPU_1xA10` jobs** (one per
+# MAGIC trial) via the CLI rather than one `GPU_8xH100` node. Each trial's time is printed below, so
+# MAGIC you can compare A10 vs H100 on your data; turn that into cost with the current
+# MAGIC [serverless GPU pricing](https://www.databricks.com/product/pricing) (`time × per-accelerator
+# MAGIC rate`) rather than a hardcoded figure. Rule of thumb: **A10 fan-out for small/short trials,
+# MAGIC 8×H100 when trials are large or long.**
 
 # COMMAND ----------
 
@@ -82,6 +92,15 @@ logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 # Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
 logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
 logging.getLogger("py4j").setLevel(logging.ERROR)
+
+
+# Notebook widget for the UC catalog/schema — set a catalog where you can CREATE schemas/volumes/
+# models (`main` is often locked down in governed workspaces). Runs before Config reads the env.
+# Notebook-only; the CLI copy takes these from the workload YAML / env instead.
+dbutils.widgets.text("UC_CATALOG", "main", "Unity Catalog (must have CREATE)")
+dbutils.widgets.text("UC_SCHEMA", "air_samples", "Schema")
+os.environ["UC_CATALOG"] = dbutils.widgets.get("UC_CATALOG")
+os.environ["UC_SCHEMA"] = dbutils.widgets.get("UC_SCHEMA")
 
 
 def _env(name: str, default: str) -> str:

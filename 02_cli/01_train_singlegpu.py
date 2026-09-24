@@ -149,7 +149,7 @@ def train_xgboost(cfg: Config, X_train, X_test, y_train, y_test):
     train_time = time.time() - t0
 
     print(f"Training completed in {train_time:.1f}s")
-    return booster, num_class, train_time
+    return booster, num_class, train_time, evals_result
 
 
 from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
@@ -169,7 +169,7 @@ def evaluate_xgboost(booster, X_test, y_test):
 import mlflow
 
 
-def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
+def log_and_register(cfg: Config, booster, num_class, metrics, X_train, evals_result):
     """Log the model to MLflow and register to Unity Catalog."""
     from mlflow.models.signature import infer_signature
 
@@ -190,6 +190,12 @@ def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
             }
         )
         mlflow.log_metrics(metrics)
+
+        # Per-round boosting curves (train/test mlogloss) -> the MLflow experiment-tracking value.
+        tr = evals_result.get("train", {}).get("mlogloss", [])
+        te = evals_result.get("test", {}).get("mlogloss", [])
+        for i, (a, b) in enumerate(zip(tr, te)):
+            mlflow.log_metrics({"train_mlogloss": a, "test_mlogloss": b}, step=i)
 
         # A real sample row makes the logged signature/input example match production inputs.
         input_example = X_train[:5]
@@ -228,11 +234,11 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     X_train, X_test, y_train, y_test = load_dataset(CFG)
-    booster, num_class, train_time = train_xgboost(CFG, X_train, X_test, y_train, y_test)
+    booster, num_class, train_time, evals_result = train_xgboost(CFG, X_train, X_test, y_train, y_test)
     metrics = evaluate_xgboost(booster, X_test, y_test)
     metrics["train_seconds"] = train_time
     print(f"Evaluation metrics: {metrics}")
-    run_id = log_and_register(CFG, booster, num_class, metrics, X_train)
+    run_id = log_and_register(CFG, booster, num_class, metrics, X_train, evals_result)
     print(f"Done. MLflow run_id={run_id}")
     return metrics
 

@@ -77,6 +77,12 @@ notebook markers.
    `mlflow.xgboost.log_model(..., registered_model_name="main.air_samples.xgboost_classification")`
    inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
    01/02 also promote the new version to the `@champion` alias, which 03 loads.
+   **Egress caveat:** logging uploads the model artifacts to the workspace artifact store
+   (`*.storage.cloud.databricks.com`). On egress-restricted or cross-region-capacity workspaces the
+   GPU node may not reach it — the upload fails with `Connection refused` (seen on some `GPU_8xH100`
+   capacity while `GPU_1xA10` in the same workspace succeeded). Workaround: `mlflow.xgboost.save_model()`
+   to a UC Volume the node can reach, then register from a control-plane context. Validate on your
+   target workspace first.
 3. **The dataset downloads at job start** via `fetch_covtype` — the GPU node needs egress to the
    scikit-learn data host. In a locked-down workspace, pre-stage the
    data in a UC Volume and point the loader at it instead.
