@@ -15,6 +15,9 @@ from dataclasses import dataclass
 # logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
 # logger so it doesn't look like a failure.
 logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+# Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
+logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -64,12 +67,14 @@ def load_model(cfg: Config):
     try:
         booster = mlflow.xgboost.load_model(uri)
         print(f"Loaded model from {uri}")
-    except Exception as exc:
+    except mlflow.exceptions.MlflowException as exc:
         print(f"Could not load {uri} ({exc}); falling back to latest version.")
         from mlflow.tracking import MlflowClient
 
-        client = MlflowClient(registry_uri="databricks-uc")
+        client = MlflowClient()
         versions = client.search_model_versions(f"name='{cfg.uc_model_fqn}'")
+        if not versions:
+            raise RuntimeError(f"No versions for {cfg.uc_model_fqn}; run 01/02 first.")
         latest = max(int(v.version) for v in versions)
         uri = f"models:/{cfg.uc_model_fqn}/{latest}"
         print(f"Loading {uri}")
@@ -84,6 +89,7 @@ def load_model(cfg: Config):
 import numpy as np
 from sklearn.datasets import fetch_covtype
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
 
 def load_inputs(cfg: Config):
@@ -150,7 +156,6 @@ def persist(cfg: Config, proba, y_test):
 
 
 def main():
-    from sklearn.metrics import accuracy_score
 
     mlflow.set_registry_uri("databricks-uc")
     print(f"CUDA available: {torch.cuda.is_available()}")

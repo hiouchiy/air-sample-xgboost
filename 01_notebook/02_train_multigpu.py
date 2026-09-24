@@ -47,7 +47,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "xgboost>=2.1,<3" "scikit-learn>=1.3,<2"
+# MAGIC %pip install "xgboost>=2.1" "scikit-learn>=1.3"
 
 # COMMAND ----------
 
@@ -68,11 +68,20 @@ import os
 import logging
 from dataclasses import dataclass
 
+
+def _logmodel_model_kw():
+    """Cross-version: MLflow >= 3 takes name=, MLflow 2.x (AIR CLI env) requires artifact_path=."""
+    import mlflow
+    return {"name": "model"} if int(mlflow.__version__.split(".")[0]) >= 3 else {"artifact_path": "model"}
+
 # Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
 # lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
 # logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
 # logger so it doesn't look like a failure.
 logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+# Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
+logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -138,9 +147,9 @@ def load_dataset(cfg: Config):
 
 
 # Run it: download once; all trials share this split.
-data = load_dataset(CFG)
-num_class = int(data[2].max()) + 1  # y_train
-num_features = data[0].shape[1]     # X_train
+X_train, X_test, y_train, y_test = load_dataset(CFG)
+data = (X_train, X_test, y_train, y_test)
+num_class = int(y_train.max()) + 1
 
 # COMMAND ----------
 
@@ -220,15 +229,22 @@ def run_hpo(cfg: Config, data, num_class):
     trials = sample_hyperparameters(cfg)
 
     t0 = time.time()
+    results = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
+        futures = {
             pool.submit(_train_one_trial, i, p, (i % n_gpu if use_gpu else 0),
-                        cfg, data, num_class, use_gpu)
+                        cfg, data, num_class, use_gpu): i
             for i, p in enumerate(trials)
-        ]
-        results = [f.result() for f in futures]
+        }
+        for fut, i in futures.items():
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # isolate trials: one bad trial must not discard the rest
+                print(f"[trial {i:02d}] FAILED: {exc}")
     wall = time.time() - t0
-    print(f"HPO wall time for {cfg.num_trials} trials: {wall:.1f}s")
+    if not results:
+        raise RuntimeError("All HPO trials failed - see the per-trial errors above.")
+    print(f"HPO: {len(results)}/{cfg.num_trials} trials succeeded in {wall:.1f}s")
     results.sort(key=lambda r: r["auc"], reverse=True)
     return results, wall, n_gpu
 
@@ -251,7 +267,7 @@ results, wall, n_gpu = run_hpo(CFG, data, num_class)
 import mlflow
 
 
-def log_and_register(cfg: Config, results, wall, n_gpu, num_features):
+def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
     from mlflow.models.signature import infer_signature
 
     mlflow.set_registry_uri("databricks-uc")
@@ -280,11 +296,12 @@ def log_and_register(cfg: Config, results, wall, n_gpu, num_features):
         # Register the best booster.
         booster = best["booster"]
         booster.set_param({"device": "cpu"})  # portable artifact; serving/infer can re-set cuda.
-        example = np.random.randn(2, num_features).astype(np.float32)
+        # Use real rows (like 01) so the logged signature/input example match production inputs.
+        example = X_sample.astype(np.float32)
         output = booster.predict(xgb.DMatrix(example))
         signature = infer_signature(model_input=example, model_output=output)
         info = mlflow.xgboost.log_model(
-            xgb_model=booster, artifact_path="model", signature=signature,
+            xgb_model=booster, **_logmodel_model_kw(), signature=signature,
             input_example=example,
             registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
         )
@@ -294,7 +311,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, num_features):
             from mlflow.tracking import MlflowClient
 
             v = info.registered_model_version
-            MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(
+            MlflowClient().set_registered_model_alias(
                 cfg.uc_model_fqn, "champion", v)
             print(f"Registered {cfg.uc_model_fqn} version {v} and set alias @champion "
                   f"(this is the version 03 will load).")
@@ -302,5 +319,5 @@ def log_and_register(cfg: Config, results, wall, n_gpu, num_features):
 
 
 # Run it: log every trial and register the best model as @champion.
-run_id = log_and_register(CFG, results, wall, n_gpu, num_features)
+run_id = log_and_register(CFG, results, wall, n_gpu, X_train[:5])
 print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")

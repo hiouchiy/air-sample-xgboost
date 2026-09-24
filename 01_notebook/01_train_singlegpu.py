@@ -41,7 +41,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -U "xgboost>=2.1,<3" "scikit-learn>=1.3,<2"
+# MAGIC %pip install "xgboost>=2.1" "scikit-learn>=1.3"
 
 # COMMAND ----------
 
@@ -63,11 +63,20 @@ import os
 import logging
 from dataclasses import dataclass
 
+
+def _logmodel_model_kw():
+    """Cross-version: MLflow >= 3 takes name=, MLflow 2.x (AIR CLI env) requires artifact_path=."""
+    import mlflow
+    return {"name": "model"} if int(mlflow.__version__.split(".")[0]) >= 3 else {"artifact_path": "model"}
+
 # Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
 # lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
 # logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
 # logger so it doesn't look like a failure.
 logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
+# Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
+logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
@@ -287,7 +296,7 @@ def log_and_register(cfg: Config, booster, num_class, metrics, X_train):
 
         model_info = mlflow.xgboost.log_model(
             xgb_model=booster,
-            artifact_path="model",
+            **_logmodel_model_kw(),
             signature=signature,
             input_example=input_example,
             registered_model_name=cfg.uc_model_fqn if cfg.register_model else None,
@@ -304,7 +313,7 @@ def _promote_to_champion(cfg: Config, model_info):
     from mlflow.tracking import MlflowClient
 
     version = model_info.registered_model_version
-    client = MlflowClient(registry_uri="databricks-uc")
+    client = MlflowClient()
     client.set_registered_model_alias(cfg.uc_model_fqn, "champion", version)
     print(f"Registered {cfg.uc_model_fqn} as version {version} and set alias @champion "
           f"(this is the version 03 will load).")

@@ -14,8 +14,8 @@ timeout_minutes: 60
 environment:
   version: "4"
   dependencies:
-    - "xgboost>=2.1,<3"
-    - "scikit-learn>=1.3,<2"
+    - "xgboost>=2.1"
+    - "scikit-learn>=1.3"
 
 compute:
   num_accelerators: 8

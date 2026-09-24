@@ -42,12 +42,12 @@ Beyond running on AI Runtime GPUs, every step is wired into the wider Databricks
 
 ## Prerequisites
 
-- A **Databricks workspace where AI Runtime is enabled.** AI Runtime is currently available in
-  **US regions on AWS/Azure** (EU/APJ/GCP were not yet GA as of this writing) — confirm with your
-  Databricks contact if unsure.
+- A **Databricks workspace where AI Runtime is enabled** — see the
+  [AI Runtime documentation](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/) for
+  current cloud/region availability.
 - Permission to **create a Unity Catalog schema and volume** in some catalog (ask your admin which
   catalog you can write to, or use one you own).
-- macOS/Linux/WSL with a terminal. (Validated on a US-region AWS workspace with AI Runtime enabled.)
+- macOS/Linux/WSL with a terminal. (Validated on a workspace with AI Runtime enabled.)
 
 ## Setup — one time, ~10 minutes
 
@@ -62,7 +62,7 @@ databricks --version               # need v0.230+
 databricks auth login --host https://<workspace-url>.cloud.databricks.com --profile air
 databricks current-user me --profile air     # should print your email
 
-# c) Install the AI Runtime CLI (`air`); it reuses the Databricks profiles above
+# c) (CLI users only — SKIP if you'll run the 01_notebook/ notebooks) Install the AI Runtime CLI (`air`)
 curl -LsSf https://astral.sh/uv/install.sh | sh      # installs `uv` if you don't have it
 uv tool install --force databricks-air --python 3.12
 air --version
@@ -161,7 +161,7 @@ Override per run by prefixing the YAML `command:` line, e.g.
 | Job fails downloading the dataset | The GPU node needs internet egress for `fetch_covtype`. In a locked-down workspace, pre-stage the data in a UC Volume and load from there. |
 | Step 03 log shows `spark-class ... ClassNotFoundException` / `dbconnect` errors | Harmless. AI Runtime GPU nodes have no Spark; these lines come from the runtime's Spark probe during MLflow logging (not from the demo code) and are safe to ignore — 03 writes a CSV to the UC Volume. |
 | `air logs` says "No logs available" | Known quirk; the run may still have succeeded. Check `Job status` and the MLflow run link. |
-| Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). AI Runtime is US-region only for now. |
+| Long "waiting for GPU capacity" | Normal for H100; retry later or run only step 1 (A10). |
 
 ## Repo layout
 
