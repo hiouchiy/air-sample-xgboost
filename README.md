@@ -28,7 +28,7 @@ Both forms share the same logic and are driven by environment variables with sen
 | 1. Single-GPU training | `01_train_singlegpu.py` | `GPU_1xA10` | GPU-accelerated XGBoost, MLflow tracking, UC registration + `@champion` |
 | 2. Parallel HPO | `02_train_multigpu.py` | `GPU_1xA10` *(default)* / `GPU_8xH100` | Hyperparameter search — **single A10, trials sequential by default** (cheapest here); attach 8×H100 to run one trial per GPU |
 | 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
-| 4. Model Serving *(Optional)* | `04_serve.py` | **CPU** serving | Real-time class predictions via **Databricks Model Serving** — on **CPU** (tabular XGBoost needs no GPU); a separate product from AI Runtime (control-plane) |
+| 4. Model Serving *(Optional, notebook only)* | `04_serve.py` | **CPU** serving | Real-time class predictions via **Databricks Model Serving** — on **CPU** (tabular XGBoost needs no GPU); a separate product from AI Runtime (control-plane) |
 
 ## What lands in the Databricks platform (both forms)
 
@@ -144,16 +144,15 @@ COPYFILE_DISABLE=1 air run --file 02_cli/train_multigpu.yaml --watch --profile a
 
 # 3) GPU batch inference over the held-out test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
-
-# 4) (Optional) Deploy a real-time CPU serving endpoint, then query it. This uses Databricks Model
-#    Serving (a separate product from AI Runtime). 04 is control-plane (not a GPU job) — run locally:
-pip install -r requirements.txt
-DATABRICKS_CONFIG_PROFILE=air python 02_cli/04_serve.py
 ```
 
 Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a few minutes for a
 GPU to be provisioned — that is normal. (Note: `air logs` sometimes prints "No logs available" even
 for successful runs; trust `Job status` and the MLflow links.)
+
+> **Model Serving (step 4) is notebook-only.** Deploying a real-time endpoint is a control-plane
+> step (not an AI Runtime GPU job), so it ships only as the `01_notebook/04_serve.py` notebook —
+> run that after step 1. There is no `02_cli/04_serve.py`.
 
 ## Appendix — parallel HPO across cheap A10s (`fanout_hpo.py`)
 
@@ -215,10 +214,9 @@ air-sample-xgboost/
 │   ├── 01_train_singlegpu.py
 │   ├── 02_train_multigpu.py
 │   ├── 03_batch_inference.py
-│   └── 04_serve.py            # (optional) real-time CPU Model Serving
+│   └── 04_serve.py            # (optional) real-time CPU Model Serving — notebook only
 ├── 02_cli/                    # AI Runtime CLI — plain scripts + workload YAMLs (air run)
 │   ├── 01_train_singlegpu.py … 03_batch_inference.py
-│   ├── 04_serve.py            # (optional) control-plane: deploy CPU Model Serving + query
 │   ├── train_singlegpu.yaml
 │   ├── train_multigpu.yaml
 │   ├── batch_inference.yaml

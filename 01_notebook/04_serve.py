@@ -24,14 +24,10 @@
 # MAGIC
 # MAGIC ## Note on execution mode
 # MAGIC This is a **control-plane** step (it calls the Serving REST API), not a GPU job — so it needs
-# MAGIC **no GPU attach** (any compute works) and does **not** use the AI Runtime CLI. Run it either
-# MAGIC way:
-# MAGIC 1. **As a Databricks notebook** — run the cells top to bottom (the `%pip` cell installs the deps), **or**
-# MAGIC 2. **Locally / in CI** — install deps first, then run with your profile:
-# MAGIC    ```bash
-# MAGIC    pip install -r requirements.txt
-# MAGIC    DATABRICKS_CONFIG_PROFILE=<your-profile> python 02_cli/04_serve.py
-# MAGIC    ```
+# MAGIC **no GPU attach** (any compute works) and does **not** use the AI Runtime CLI. Just run the
+# MAGIC cells top to bottom: the `%pip` cell installs the deps and auth is the notebook's own.
+# MAGIC (Serving ships **as this notebook only** — there is no CLI counterpart, since deploying an
+# MAGIC endpoint is a control-plane call rather than an `air run` GPU job.)
 # MAGIC It uses the MLflow **Deployments** client (`get_deploy_client("databricks")`), whose dict config
 # MAGIC is the stable REST shape — so it does not break across `databricks-sdk` versions.
 
