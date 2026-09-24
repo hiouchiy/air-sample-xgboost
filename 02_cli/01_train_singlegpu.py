@@ -7,7 +7,14 @@ YAML. The notebook-optimized equivalent is 01_notebook/01_train_singlegpu.py.
 """
 
 import os
+import logging
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
+# logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
+# logger so it doesn't look like a failure.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:

@@ -12,8 +12,8 @@ runs **GPU batch inference** to predict on new data.
 
 Each step ships in **two forms**, so you can pick whichever fits and neither needs editing:
 
-- **`01_notebook/`** — Databricks notebooks (`# Databricks notebook source` `.py`). **Import into the
-  workspace and Run All.** Rich per-cell markdown; `%pip` cells install dependencies.
+- **`01_notebook/`** — Databricks notebooks (`# Databricks notebook source` `.py`). **Import and step
+  through the cells** (top to bottom). Rich per-cell markdown; `%pip` cells install dependencies.
 - **`02_cli/`** — plain Python scripts + AI Runtime CLI workload YAMLs. **Submit with `air run`.**
   No notebook markers; dependencies come from the YAML.
 
@@ -121,7 +121,7 @@ then **attach a serverless AI Runtime GPU** — there is no cluster to create:
    leave the default **Base environment**.
 4. Click **Apply**, then **Confirm**.
 
-Then **Run All** — each step cell runs and shows its output as you go. The `%pip` cells install
+Then **run the cells one at a time, top to bottom**, reviewing each step's output (Run All works too). The `%pip` cells install
 dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_inference.py`. See
 [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 
@@ -167,7 +167,7 @@ Override per run by prefixing the YAML `command:` line, e.g.
 
 ```
 air-sample-xgboost/
-├── 01_notebook/               # Databricks notebooks — import + Run All
+├── 01_notebook/               # Databricks notebooks — import + step through
 │   ├── 01_train_singlegpu.py
 │   ├── 02_train_multigpu.py
 │   └── 03_batch_inference.py

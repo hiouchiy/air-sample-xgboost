@@ -21,7 +21,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ▶ Before you Run All — attach a serverless 8×H100 GPU
+# MAGIC ## ▶ Before you start — attach a serverless 8×H100 GPU
 # MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. For 8-way parallelism this
 # MAGIC notebook wants a **`GPU_8xH100`** node (it parallelizes over whatever GPUs are attached, so a
 # MAGIC 1-GPU compute also works — the trials just run sequentially). Attach one from the notebook:
@@ -30,7 +30,7 @@
 # MAGIC 3. Set **Accelerator** to **8xH100** (`GPU_8xH100`); leave the default **Base environment**.
 # MAGIC 4. Click **Apply**, then **Confirm**.
 # MAGIC
-# MAGIC Then **Run All** — the steps below execute top to bottom and show their output as you go.
+# MAGIC Then **run the cells one at a time, top to bottom**, reviewing each step's output. (Run All works too, but stepping through is recommended for a sample you're evaluating.)
 # MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 # MAGIC
 # MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/02_train_multigpu.py` — run
@@ -40,8 +40,10 @@
 
 # MAGIC %md
 # MAGIC ## 1. Install dependencies
-# MAGIC These `%pip` cells install the dependencies when you Run All. (The CLI copy in `02_cli/`
-# MAGIC gets them from its workload YAML instead.)
+# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
+# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
+# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
+# MAGIC from the workload YAML instead.)
 
 # COMMAND ----------
 
@@ -49,6 +51,8 @@
 
 # COMMAND ----------
 
+# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
+# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -61,7 +65,14 @@
 # COMMAND ----------
 
 import os
+import logging
 from dataclasses import dataclass
+
+# Serverless/AI Runtime enforces a py4j method whitelist, so MLflow's optional run-context tag
+# lookup logs a benign `Py4JSecurityException ... extraContext ... not whitelisted` warning during
+# logging. It's harmless (MLflow skips a couple of optional tags and continues) — quiet just that
+# logger so it doesn't look like a failure.
+logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 
 
 def _env(name: str, default: str) -> str:
