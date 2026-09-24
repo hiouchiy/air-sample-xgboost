@@ -30,6 +30,35 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _ensure_uc(catalog, schema, volume=None):
+    """Create the UC schema (and optionally a MANAGED volume) if missing, so a fresh catalog runs
+    top-to-bottom with no manual setup. Falls back to an actionable message without CREATE rights."""
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.catalog import VolumeType
+
+    w = WorkspaceClient()
+
+    def _create(fn, what):
+        try:
+            fn()
+            print(f"Created {what}")
+        except Exception as e:
+            m = str(e).lower()
+            if "already exists" in m:
+                return
+            if any(t in m for t in ("permission", "denied", "does not have", "unauthorized")):
+                raise RuntimeError(
+                    f"Cannot create {what}: {e}\nGrant CREATE on catalog '{catalog}', or pre-create "
+                    f"it (see setup.sh / the README), or set UC_CATALOG/UC_SCHEMA to an existing one."
+                ) from e
+            raise
+
+    _create(lambda: w.schemas.create(name=schema, catalog_name=catalog), f"schema {catalog}.{schema}")
+    if volume:
+        _create(lambda: w.volumes.create(catalog_name=catalog, schema_name=schema, name=volume,
+                                         volume_type=VolumeType.MANAGED), f"volume {catalog}.{schema}.{volume}")
+
+
 @dataclass
 class Config:
     gpu_type: str = _env("GPU_TYPE", "H100")
@@ -175,6 +204,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
     from mlflow.models.signature import infer_signature
 
     mlflow.set_registry_uri("databricks-uc")
+    _ensure_uc(cfg.uc_catalog, cfg.uc_schema)
     best = results[0]
 
     nested = mlflow.active_run() is not None

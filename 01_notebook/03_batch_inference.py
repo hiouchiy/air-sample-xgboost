@@ -87,6 +87,35 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _ensure_uc(catalog, schema, volume=None):
+    """Create the UC schema (and optionally a MANAGED volume) if missing, so a fresh catalog runs
+    top-to-bottom with no manual setup. Falls back to an actionable message without CREATE rights."""
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.catalog import VolumeType
+
+    w = WorkspaceClient()
+
+    def _create(fn, what):
+        try:
+            fn()
+            print(f"Created {what}")
+        except Exception as e:
+            m = str(e).lower()
+            if "already exists" in m:
+                return
+            if any(t in m for t in ("permission", "denied", "does not have", "unauthorized")):
+                raise RuntimeError(
+                    f"Cannot create {what}: {e}\nGrant CREATE on catalog '{catalog}', or pre-create "
+                    f"it (see setup.sh / the README), or set UC_CATALOG/UC_SCHEMA to an existing one."
+                ) from e
+            raise
+
+    _create(lambda: w.schemas.create(name=schema, catalog_name=catalog), f"schema {catalog}.{schema}")
+    if volume:
+        _create(lambda: w.volumes.create(catalog_name=catalog, schema_name=schema, name=volume,
+                                         volume_type=VolumeType.MANAGED), f"volume {catalog}.{schema}.{volume}")
+
+
 @dataclass
 class Config:
     uc_catalog: str = _env("UC_CATALOG", "main")
@@ -254,16 +283,9 @@ def persist(cfg: Config, proba, y_test):
     if y_test is not None:
         pdf["true_label"] = y_test
 
+    # Auto-create the schema + predictions volume if missing (friendly fallback without CREATE).
+    _ensure_uc(cfg.uc_catalog, cfg.uc_schema, "predictions")
     out_dir = f"/Volumes/{cfg.uc_catalog}/{cfg.uc_schema}/predictions"
-    # A UC Volume can't be created by mkdir on the /Volumes FUSE mount (that raises a cryptic
-    # Errno 95). If the Volume is missing, tell the user exactly how to create it.
-    if not os.path.isdir(out_dir):
-        raise FileNotFoundError(
-            f"UC Volume {out_dir} not found. Create it once:\n"
-            f"  databricks volumes create {cfg.uc_catalog} {cfg.uc_schema} predictions MANAGED\n"
-            f"(or run setup.sh with CATALOG={cfg.uc_catalog}), or set UC_CATALOG/UC_SCHEMA to an "
-            f"existing Volume."
-        )
     path = f"{out_dir}/{cfg.output_name}.csv"
     pdf.to_csv(path, index=False)
     print(f"Wrote {len(pdf)} predictions to UC Volume: {path}")

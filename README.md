@@ -3,8 +3,9 @@
 End-to-end **XGBoost GPU training, batch inference** on **Databricks AI Runtime**
 (serverless NVIDIA GPUs). It trains an **XGBoost multi-class classifier** on the public **Forest
 CoverType** dataset (581,012 rows × 54 features, 7 classes) — demonstrating **GPU-accelerated
-gradient boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**, and
-runs **GPU batch inference** to predict on new data.
+gradient boosting**, tracks everything with **MLflow**, registers the model to **Unity Catalog**,
+runs **GPU batch inference**, and **optionally** deploys a **CPU Model Serving** endpoint (tabular
+inference needs no GPU).
 
 > AIR = AI Runtime.
 
@@ -27,6 +28,7 @@ Both forms share the same logic and are driven by environment variables with sen
 | 1. Single-GPU training | `01_train_singlegpu.py` | `GPU_1xA10` | GPU-accelerated XGBoost, MLflow tracking, UC registration + `@champion` |
 | 2. Parallel HPO | `02_train_multigpu.py` | `GPU_1xA10` *(default)* / `GPU_8xH100` | Hyperparameter search — **single A10, trials sequential by default** (cheapest here); attach 8×H100 to run one trial per GPU |
 | 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
+| 4. Model Serving *(Optional)* | `04_serve.py` | **CPU** serving | Real-time class predictions via **Databricks Model Serving** — on **CPU** (tabular XGBoost needs no GPU); a separate product from AI Runtime (control-plane) |
 
 ## What lands in the Databricks platform (both forms)
 
@@ -76,6 +78,11 @@ databricks volumes create $CATALOG air_samples predictions MANAGED --profile air
 
 > Prefer one command? Run `CATALOG=main PROFILE=air ./setup.sh` (see [`setup.sh`](setup.sh)).
 
+> **This Setup is optional** — on first run the notebooks and CLI jobs **auto-create** the
+> schema + `predictions` volume if you have `CREATE` on the catalog. Run it (or grant CREATE)
+> only if the auto-create step reports a permission error.
+
+
 ## Point the demo at your catalog
 
 The scripts default to catalog **`main`**, schema **`air_samples`** — the same values the Setup
@@ -84,9 +91,9 @@ governed ones** — pick a catalog where you can create schemas/volumes/models. 
 
 - **Notebook (recommended):** use the **`UC_CATALOG` / `UC_SCHEMA` widgets** at the top of the
   notebook — no code edit, and it runs before anything else. Or
-- edit the `UC_CATALOG` / `UC_SCHEMA` default lines near the top of each script, or
-- prefix the YAML `command:` line, e.g.
-  `command: UC_CATALOG=mycat python $CODE_SOURCE_PATH/02_cli/01_train_singlegpu.py`.
+- **CLI (no file edit):** override the workload env var, e.g.
+  `air run --file 02_cli/train_singlegpu.yaml --override env_variables.UC_CATALOG=mycat --profile air`
+  (each `02_cli/*.yaml` declares `env_variables: UC_CATALOG/UC_SCHEMA`).
 
 Use the **same profile name** you created (`air`) in every `air run --profile ...` below.
 
@@ -103,7 +110,8 @@ then **attach a serverless AI Runtime GPU** — there is no cluster to create:
 4. Click **Apply**, then **Confirm**.
 
 Then **run the cells one at a time, top to bottom**, reviewing each step's output (Run All works too). The `%pip` cells install
-dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_inference.py`. See
+dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_inference.py`, then
+(optionally) `04_serve.py` — which is control-plane and needs **no GPU** (any compute). See
 [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 
 - `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
@@ -130,6 +138,11 @@ COPYFILE_DISABLE=1 air run --file 02_cli/train_multigpu.yaml --watch --profile a
 
 # 3) GPU batch inference over the held-out test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
+
+# 4) (Optional) Deploy a real-time CPU serving endpoint, then query it. This uses Databricks Model
+#    Serving (a separate product from AI Runtime). 04 is control-plane (not a GPU job) — run locally:
+pip install -r requirements.txt
+DATABRICKS_CONFIG_PROFILE=air python 02_cli/04_serve.py
 ```
 
 Each `air run` ends with `Job status: SUCCESS` on success. The first run waits a few minutes for a
@@ -194,9 +207,11 @@ air-sample-xgboost/
 ├── 01_notebook/               # Databricks notebooks — import + step through
 │   ├── 01_train_singlegpu.py
 │   ├── 02_train_multigpu.py
-│   └── 03_batch_inference.py
+│   ├── 03_batch_inference.py
+│   └── 04_serve.py            # (optional) real-time CPU Model Serving
 ├── 02_cli/                    # AI Runtime CLI — plain scripts + workload YAMLs (air run)
 │   ├── 01_train_singlegpu.py … 03_batch_inference.py
+│   ├── 04_serve.py            # (optional) control-plane: deploy CPU Model Serving + query
 │   ├── train_singlegpu.yaml
 │   ├── train_multigpu.yaml
 │   ├── batch_inference.yaml

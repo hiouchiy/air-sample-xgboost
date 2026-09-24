@@ -100,6 +100,8 @@ notebook markers.
 | `01_train_singlegpu.py` (+ `02_cli/train_singlegpu.yaml`) | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
 | `02_train_multigpu.py` (+ `02_cli/train_multigpu.yaml`) | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
 | `03_batch_inference.py` (+ `02_cli/batch_inference.yaml`) | GPU batch inference from the UC model → predictions CSV on a UC Volume |
+| `04_serve.py` *(optional)* | Deploy the `@champion` model to a **CPU** Model Serving endpoint + query it (control-plane; no GPU) |
+| `02_cli/fanout_hpo.py` *(optional)* | Control-plane orchestrator: parallel HPO across N single-A10 jobs → promotes the best to `@champion` |
 
 Each of the above exists in both `01_notebook/` (Run All) and `02_cli/` (`air run`) form.
 
