@@ -18,8 +18,8 @@ environment:
     - "scikit-learn>=1.3"
 
 compute:
-  num_accelerators: 8
-  accelerator_type: GPU_8xH100
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
 
 code_source:
   type: snapshot

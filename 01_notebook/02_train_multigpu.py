@@ -1,11 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # XGBoost — Multi-GPU parallel hyperparameter search (8×H100)
+# MAGIC # XGBoost — Parallel hyperparameter search (single A10 by default; scale to 8×H100)
 # MAGIC
-# MAGIC This example uses **all 8 H100 GPUs of a single AI Runtime node in parallel** to run a
-# MAGIC **hyperparameter search** on the public **Forest CoverType** dataset: many XGBoost models are
-# MAGIC trained concurrently, **one trial per GPU**, and the best model (by validation AUC) is
-# MAGIC registered to Unity Catalog.
+# MAGIC This example runs a **hyperparameter search** on the public **Forest CoverType** dataset:
+# MAGIC many XGBoost models are trained, the best (by validation AUC) is registered to Unity Catalog.
+# MAGIC The search is a thread pool over `torch.cuda.device_count()`, so the **same code** runs on
+# MAGIC whatever you attach — **one `GPU_1xA10` by default** (trials run sequentially, cheapest for
+# MAGIC this small dataset) or a **`GPU_8xH100`** node (one trial per GPU, 8-way parallel).
+# MAGIC **For this dataset we recommend the single A10** — see "Choosing the GPU tier" below.
 # MAGIC
 # MAGIC ## Why this pattern for "multi-GPU classic ML"?
 # MAGIC For gradient-boosted trees, a single H100 (80 GB) trains most tabular datasets quickly, so the
@@ -14,31 +16,34 @@
 # MAGIC cluster framework: XGBoost releases the GIL during training, so a simple thread pool dispatches
 # MAGIC one training per GPU (`device="cuda:<i>"`) and they run truly concurrently.
 # MAGIC
-# MAGIC (Data-parallel single-model training across GPUs — `xgboost.dask` + Dask-CUDA — is the other
-# MAGIC multi-GPU mode, reserved for datasets too large for one GPU; on AI Runtime it needs a custom
-# MAGIC RAPIDS image, whereas this parallel-HPO pattern runs on the stock environment.)
-# MAGIC
-# MAGIC ### Choosing the GPU tier — 8×H100 vs A10 (cost-performance)
+# MAGIC ### Choosing the GPU tier — single A10 (default) vs 8×H100
 # MAGIC This dataset is **small for a GPU** (~581k×54; a trial finishes in seconds), so an H100 is
-# MAGIC under-utilized and its edge over an A10 here is modest. Because HPO is embarrassingly parallel,
-# MAGIC the cost-effective alternative is often to **fan out N single-`GPU_1xA10` jobs** (one per
-# MAGIC trial) via the CLI rather than one `GPU_8xH100` node. Each trial's time is printed below, so
-# MAGIC you can compare A10 vs H100 on your data; turn that into cost with the current
+# MAGIC under-utilized and its per-trial edge over an A10 is modest — while it costs several× more per
+# MAGIC GPU-hour. And because each trial takes **seconds** but GPU **startup takes minutes**, the
+# MAGIC startup dominates: one A10 running all trials sequentially is usually the **cheapest and
+# MAGIC simplest** choice here. So this sample **defaults to a single `GPU_1xA10`**.
+# MAGIC
+# MAGIC Scale up only when it pays off — for **larger/longer trials**, attach a **`GPU_8xH100`** node
+# MAGIC and the same code fans the trials 8-way (one per GPU). Each trial's time is printed below;
+# MAGIC turn it into cost with the current
 # MAGIC [serverless GPU pricing](https://www.databricks.com/product/pricing) (`time × per-accelerator
-# MAGIC rate`) rather than a hardcoded figure. Rule of thumb: **A10 fan-out for small/short trials,
-# MAGIC 8×H100 when trials are large or long.**
+# MAGIC rate`) rather than a hardcoded figure. (Data-parallel single-model training — `xgboost.dask` +
+# MAGIC Dask-CUDA — is a different, niche mode for data too large for one GPU; on AIR it needs a custom
+# MAGIC RAPIDS image.)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ▶ Before you start — attach a serverless 8×H100 GPU
-# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. For 8-way parallelism this
-# MAGIC notebook wants a **`GPU_8xH100`** node (it parallelizes over whatever GPUs are attached, so a
-# MAGIC 1-GPU compute also works — the trials just run sequentially). Attach one from the notebook:
+# MAGIC ## ▶ Before you start — attach a serverless GPU
+# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook **defaults to
+# MAGIC a single `GPU_1xA10`** (trials run sequentially — cheapest for this dataset). Attach one:
 # MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
 # MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
-# MAGIC 3. Set **Accelerator** to **8xH100** (`GPU_8xH100`); leave the default **Base environment**.
+# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
 # MAGIC 4. Click **Apply**, then **Confirm**.
+# MAGIC
+# MAGIC **To parallelize (larger/longer trials):** attach **`GPU_8xH100`** instead — the same code runs
+# MAGIC one trial per GPU, 8-way.
 # MAGIC
 # MAGIC Then **run the cells one at a time, top to bottom**, reviewing each step's output. (Run All works too, but stepping through is recommended for a sample you're evaluating.)
 # MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
@@ -299,7 +304,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
             "num_trials": cfg.num_trials,
             "num_gpus": n_gpu,
             "n_estimators": cfg.n_estimators,
-            "training_mode": f"parallel-hpo-{n_gpu}x{cfg.gpu_type}",
+            "training_mode": f"parallel-hpo-{n_gpu}gpu",
         })
         mlflow.log_metrics({
             "hpo_wall_seconds": wall,

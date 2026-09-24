@@ -25,7 +25,7 @@ Both forms share the same logic and are driven by environment variables with sen
 | Step | Notebook / CLI script | AIR compute | Shows |
 |------|-----------------------|-------------|-------|
 | 1. Single-GPU training | `01_train_singlegpu.py` | `GPU_1xA10` | GPU-accelerated XGBoost, MLflow tracking, UC registration + `@champion` |
-| 2. Multi-GPU HPO | `02_train_multigpu.py` | `GPU_8xH100` | Parallel hyperparameter search — one trial per GPU across all 8 |
+| 2. Parallel HPO | `02_train_multigpu.py` | `GPU_1xA10` *(default)* / `GPU_8xH100` | Hyperparameter search — **single A10, trials sequential by default** (cheapest here); attach 8×H100 to run one trial per GPU |
 | 3. GPU batch inference | `03_batch_inference.py` | `GPU_1xA10` | Loading the `@champion` UC model, batched GPU scoring, CSV to a UC Volume |
 
 ## What lands in the Databricks platform (both forms)
@@ -97,7 +97,8 @@ then **attach a serverless AI Runtime GPU** — there is no cluster to create:
 
 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
 2. Click the **environment** icon to open the **Environment** side panel.
-3. Set **Accelerator** (`GPU_1xA10` for 01/03; **`GPU_8xH100`** for `02_train_multigpu.py`) and
+3. Set **Accelerator** to **`GPU_1xA10`** (all notebooks; `02_train_multigpu.py` also runs on
+   **`GPU_8xH100`** if you want 8-way parallel HPO) and
    leave the default **Base environment**.
 4. Click **Apply**, then **Confirm**.
 
@@ -106,8 +107,9 @@ dependencies automatically. Start with `01_train_singlegpu.py`, then `03_batch_i
 [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
 
 - `02_train_multigpu.py` parallelizes over **whatever GPUs are attached** (`torch.cuda.device_count()`
-  with a thread pool), so attach a **`GPU_8xH100`** AI Runtime compute to get 8-way parallelism. It
-  still runs on a 1-GPU compute (trials just run sequentially).
+  with a thread pool). It **defaults to a single `GPU_1xA10`** (trials run sequentially — cheapest for
+  this small dataset); attach a **`GPU_8xH100`** node only for larger/longer trials to get 8-way
+  parallelism.
 - The **first** run waits several minutes (~5 min on A10, ~7 min on 8×H100) for GPU capacity before
   any cell executes — that's normal cold start, not a hang.
 
@@ -122,7 +124,8 @@ Step 3 needs the model that step 1 (or 2) registers, so **run 01 first.**
 # 1) Train on one A10 GPU (device="cuda") → MLflow → register to Unity Catalog  (~5 min incl. GPU wait)
 COPYFILE_DISABLE=1 air run --file 02_cli/train_singlegpu.yaml --watch --profile air
 
-# 2) Parallel hyperparameter search on 8× H100 — one trial per GPU; registers the best model
+# 2) Hyperparameter search — defaults to a single A10 (trials sequential; cheapest here). For 8-way
+#    parallel, override the accelerator to GPU_8xH100. Registers the best model either way.
 COPYFILE_DISABLE=1 air run --file 02_cli/train_multigpu.yaml --watch --profile air
 
 # 3) GPU batch inference over the held-out test set → predictions CSV on the UC Volume

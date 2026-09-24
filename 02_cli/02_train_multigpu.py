@@ -178,7 +178,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
             "num_trials": cfg.num_trials,
             "num_gpus": n_gpu,
             "n_estimators": cfg.n_estimators,
-            "training_mode": f"parallel-hpo-{n_gpu}x{cfg.gpu_type}",
+            "training_mode": f"parallel-hpo-{n_gpu}gpu",
         })
         mlflow.log_metrics({
             "hpo_wall_seconds": wall,
