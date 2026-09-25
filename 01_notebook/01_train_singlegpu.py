@@ -176,7 +176,7 @@ print(CFG)
 # MAGIC We download the public **Forest CoverType** dataset via scikit-learn (cached locally after
 # MAGIC the first run) and split it into train/test. The source labels are 1..7; XGBoost multi-class
 # MAGIC expects 0..6, so we shift them by one. The split is deterministic (fixed `TEST_SIZE` +
-# MAGIC `RANDOM_STATE`), so batch inference (03) can regenerate the identical held-out split. For a
+# MAGIC `RANDOM_STATE`), so batch inference (02) can regenerate the identical held-out split. For a
 # MAGIC production model, swap this cell for your own data loaded from a UC table.
 
 # COMMAND ----------
@@ -408,7 +408,7 @@ def log_and_register(cfg: Config, booster, num_class, metrics, X_train, evals_re
 
 def _promote_to_champion(cfg: Config, model_info):
     """Tag the just-registered version with the @champion alias — this is what batch inference
-    (03) loads by default, so version promotion is explicit and governed."""
+    (02) loads by default, so version promotion is explicit and governed."""
     from mlflow.tracking import MlflowClient
 
     version = model_info.registered_model_version

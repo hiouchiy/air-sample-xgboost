@@ -1,0 +1,35 @@
+# AI Runtime CLI workload spec — XGBoost HPO worker (single GPU_1xA10).
+#
+# This is the per-job worker that fanout_hpo.py submits (one job per trial shard, fanned out across
+# N cheap single-A10 nodes). You can also run it standalone for a single-node hyperparameter search:
+#   COPYFILE_DISABLE=1 air run --file 02_cli/hpo_worker.yaml --watch --profile <your-profile>
+#
+# It runs 02_cli/hpo_worker.py: several XGBoost trials on one A10 (thread pool; XGBoost releases the
+# GIL during training), then registers the best model. No cluster framework or torchrun needed.
+
+experiment_name: xgboost-hpo
+max_retries: 0
+timeout_minutes: 60
+
+environment:
+  version: "4"
+  dependencies:
+    - "xgboost>=2.1"
+    - "scikit-learn>=1.3"
+
+# UC target as workload env vars — override without editing files:
+#   air run ... --override env_variables.UC_CATALOG=<your-catalog>
+env_variables:
+  UC_CATALOG: main
+  UC_SCHEMA: air_samples
+
+compute:
+  num_accelerators: 1
+  accelerator_type: GPU_1xA10
+
+code_source:
+  type: snapshot
+  snapshot:
+    root_path: ..
+
+command: python $CODE_SOURCE_PATH/02_cli/hpo_worker.py

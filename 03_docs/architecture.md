@@ -3,11 +3,11 @@
 ## End-to-end flow
 
 ```
-   Forest CoverType ──► AI Runtime GPU node (serverless)
+   Forest CoverType ──► AI Runtime GPU node(s) (serverless)
    (sklearn download)  │
-                       │  01 single-GPU (A10)      02 multi-GPU (8×H100)
-                       │  device="cuda" hist       parallel HPO: 1 trial per GPU
-                       │        │                        │  pick best by AUC
+                       │  01 single-GPU (A10)      02 fan-out HPO (N × A10)
+                       │  device="cuda" hist       N single-A10 jobs, each a
+                       │        │                  trial shard → pick global best
                        │        ▼                        ▼
                        │  MLflow run (params, metrics, model + register)
                        └────────┼───────────────────────────────────────
@@ -17,6 +17,8 @@
                                 │
                  03 GPU batch inference (AI Runtime GPU)
                  → predictions CSV on a UC Volume
+
+   (02 fan-out is a local control-plane orchestrator, fanout_hpo.py, that submits the N jobs.)
 ```
 
 ## Model & data
@@ -32,27 +34,34 @@
   (fixed `TEST_SIZE` + `RANDOM_STATE`), so batch inference (`03`) regenerates the identical held-out
   split. Swap in your own UC table for a real workload.
 
-## The two GPU modes for XGBoost — and which this repo uses
+## How this repo scales XGBoost — and why not 8×H100
 
-XGBoost has two distinct ways to use more than one GPU. They solve different problems:
+XGBoost on a CoverType-scale dataset trains in **seconds on a single A10**, so a large multi-GPU box
+is the wrong tool. This repo therefore scales the way classic ML actually scales in practice:
 
-1. **Task-parallel — parallel hyperparameter search (this repo's `02`).** Independent models are
-   trained concurrently, **one trial per GPU**. XGBoost releases the GIL during `train`, so a plain
-   `ThreadPoolExecutor` (one worker per GPU, each with `device="cuda:<i>"`) runs the trials in true
-   parallel — no cluster framework. This is the most common real reason to point 8 GPUs at a
-   classic-ML job, and it runs on the **stock AI Runtime environment**. Validated: 8 trials across
-   `cuda:0…cuda:7` finished in ~5 s wall time (vs ~24 s summed) — clear parallel speedup.
+1. **Single-GPU training (`01`).** One A10, `device="cuda"`. This is the baseline and, for many real
+   tabular jobs, all you need.
 
-2. **Data-parallel — one model, data split across GPUs (`xgboost.dask` + Dask-CUDA).** Used only
-   when a dataset is **too large for one GPU's memory**. A single H100 has 80 GB and trains most
-   tabular data faster without the per-round AllReduce overhead, so this is a niche. **Note for AI
-   Runtime:** `dask_cuda.LocalCUDACluster` hangs at worker startup on the stock AIR environment; to
-   use it you need a **custom RAPIDS Docker image** (`air register image`). Multi-node scale-out for
-   XGBoost is typically done with the **Spark connector** (`xgboost.spark`) on a lakehouse instead.
+2. **Horizontal HPO fan-out (`02` — `fanout_hpo.py`).** HPO is embarrassingly parallel, so the
+   realistic, cost-appropriate way to speed it up is to spread trials across **N cheap single-A10
+   jobs** (each runs a shard of the same seeded grid via `hpo_worker.py`), then promote the global
+   best to `@champion`. This is a **control-plane** orchestrator (submits N `air run` jobs; no GPU,
+   no mlflow locally) and runs on the **stock AI Runtime environment**. Validated: 2 workers → best
+   model promoted to `@champion`.
 
-> Honesty for the customer: XGBoost multi-GPU is not "always on" like DL data parallelism. Default
-> to a single GPU; reach for parallel HPO to use many GPUs, or Dask/Spark data-parallel only when the
-> data genuinely exceeds one GPU.
+**Why not the on-node multi-GPU options?**
+- **On-node multi-GPU (`GPU_8xH100`).** AIR's only multi-GPU node is 8×H100. You *could* run one HPO
+  trial per GPU on it (XGBoost releases the GIL, so a `ThreadPoolExecutor` parallelizes trials), but
+  for a seconds-long fit that's expensive and hard to justify — the honest signal to a customer is
+  "use cheap A10 fan-out, not an H100 box." (The BERT sample *does* use 8×H100, because transformer
+  DDP is genuine distributed training — different workload, different strategy.)
+- **Data-parallel (`xgboost.dask` + Dask-CUDA).** Only for datasets **too large for one GPU's
+  memory** (a single H100 has 80 GB and trains most tabular data faster without per-round AllReduce).
+  On AIR, `dask_cuda.LocalCUDACluster` hangs at worker startup on the stock env (needs a custom
+  RAPIDS image); multi-node XGBoost is usually done with the **Spark connector** (`xgboost.spark`).
+
+> Honesty for the customer: match the scaling strategy to the workload. For classic-ML HPO that's
+> horizontal fan-out across cheap nodes — not reaching for the biggest GPU box.
 
 ## Notebook and CLI forms
 
@@ -65,9 +74,10 @@ Each step exists as two files that share the same logic:
   `air run`; deps come from the workload YAML. Each pairs with a `02_cli/*.yaml` spec.
 
 All config is environment variables with defaults, so neither form needs editing. Note that **none of
-`01`/`02`/`03` uses `torchrun` or `serverless_gpu`** — the parallel-HPO thread pool and the
-single-GPU trainer both run in one process, so the notebook and CLI files differ only by the
-notebook markers.
+the GPU scripts uses `torchrun` or `serverless_gpu`** — the single-GPU trainer and each HPO worker
+run in one process, so the notebook and CLI files differ only by the notebook markers. The HPO
+fan-out is the exception: it's a control-plane orchestrator (`02_cli/fanout_hpo.py`) with **no
+notebook form**, because scaling HPO across nodes means submitting multiple `air run` jobs.
 
 ## AI Runtime operational notes
 
@@ -76,13 +86,13 @@ notebook markers.
 2. **Model logging + UC registration works with the standard API**:
    `mlflow.xgboost.log_model(..., registered_model_name="main.air_samples.xgboost_classification")`
    inside a run. A model **signature** (via `infer_signature`) is required for UC registration.
-   01/02 also promote the new version to the `@champion` alias, which 03 loads.
+   Single-GPU training (01) promotes its version to the `@champion` alias and the fan-out promotes
+   the global-best version; batch inference (02) loads `@champion`.
    **Egress caveat:** logging uploads the model artifacts to the workspace artifact store
    (`*.storage.cloud.databricks.com`). On egress-restricted or cross-region-capacity workspaces the
-   GPU node may not reach it — the upload fails with `Connection refused` (seen on some `GPU_8xH100`
-   capacity while `GPU_1xA10` in the same workspace succeeded). Workaround: `mlflow.xgboost.save_model()`
-   to a UC Volume the node can reach, then register from a control-plane context. Validate on your
-   target workspace first.
+   GPU node may not reach it — the upload fails with `Connection refused`. Workaround:
+   `mlflow.xgboost.save_model()` to a UC Volume the node can reach, then register from a
+   control-plane context. Validate on your target workspace first.
 3. **The dataset downloads at job start** via `fetch_covtype` — the GPU node needs egress to the
    scikit-learn data host. In a locked-down workspace, pre-stage the
    data in a UC Volume and point the loader at it instead.
@@ -90,20 +100,21 @@ notebook markers.
    out of the code snapshot.
 5. **`air logs` may report "No logs available"** even for successful runs; `air run --watch`
    streams execution logs live. For debugging, write to a UC Volume.
-6. **No Spark on AI Runtime GPU nodes** — so batch inference (`03`) writes its predictions directly
+6. **No Spark on AI Runtime GPU nodes** — so batch inference (`02`) writes its predictions directly
    to a CSV on a UC Volume (`/Volumes/<catalog>/air_samples/predictions/`); it never invokes Spark.
 
 ## Files
 
 | File | Role |
 |------|------|
-| `01_train_singlegpu.py` (+ `02_cli/train_singlegpu.yaml`) | Single-GPU (A10) training, `device="cuda"` → MLflow → UC |
-| `02_train_multigpu.py` (+ `02_cli/train_multigpu.yaml`) | 8×H100 parallel hyperparameter search (1 trial/GPU) → best model → UC |
-| `03_batch_inference.py` (+ `02_cli/batch_inference.yaml`) | GPU batch inference from the UC model → predictions CSV on a UC Volume |
-| `04_serve.py` *(optional)* | Deploy the `@champion` model to a **CPU** Model Serving endpoint + query it (control-plane; no GPU) |
-| `02_cli/fanout_hpo.py` *(optional)* | Control-plane orchestrator: parallel HPO across N single-A10 jobs → promotes the best to `@champion` |
+| `01_train_singlegpu.py` (+ `02_cli/train_singlegpu.yaml`) | Single-GPU (A10) training, `device="cuda"` → MLflow → UC. Notebook + CLI. |
+| `02_batch_inference.py` (+ `02_cli/batch_inference.yaml`) | GPU batch inference from the UC model → predictions CSV on a UC Volume. Notebook + CLI. |
+| `03_serve.py` *(optional)* | Deploy the `@champion` model to a **CPU** Model Serving endpoint + query it (control-plane; no GPU). **Notebook-only.** |
+| `02_cli/fanout_hpo.py` *(optional scale-out)* | Control-plane orchestrator: fan HPO across N single-A10 jobs → promote the global best to `@champion`. An alternative to step 1. **CLI-only** (no notebook). |
+| `02_cli/hpo_worker.py` (+ `02_cli/hpo_worker.yaml`) | The per-job HPO worker `fanout_hpo.py` submits: a trial shard on one A10 → best-of-shard → UC. Also runnable standalone. CLI-only. |
 
-Each of the above exists in both `01_notebook/` (Run All) and `02_cli/` (`air run`) form.
+Steps 1 and 2 ship in both `01_notebook/` (Run All) and `02_cli/` (`air run`) form; step 3 (serving)
+is notebook-only and the HPO fan-out is CLI-only, as noted above.
 
 ## References
 

@@ -1,83 +1,16 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # XGBoost — Parallel hyperparameter search (single A10 by default; scale to 8×H100)
-# MAGIC
-# MAGIC This example runs a **hyperparameter search** on the public **Forest CoverType** dataset:
-# MAGIC many XGBoost models are trained, the best (by validation AUC) is registered to Unity Catalog.
-# MAGIC The search is a thread pool over `torch.cuda.device_count()`, so the **same code** runs on
-# MAGIC whatever you attach — **one `GPU_1xA10` by default** (trials run sequentially, cheapest for
-# MAGIC this small dataset) or a **`GPU_8xH100`** node (one trial per GPU, 8-way parallel).
-# MAGIC **For this dataset we recommend the single A10** — see "Choosing the GPU tier" below.
-# MAGIC
-# MAGIC ## Why this pattern for "multi-GPU classic ML"?
-# MAGIC For gradient-boosted trees, a single H100 (80 GB) trains most tabular datasets quickly, so the
-# MAGIC realistic way to put 8 GPUs to work is **task-parallel hyperparameter tuning** — an
-# MAGIC embarrassingly parallel workload where each GPU trains an independent candidate. It needs no
-# MAGIC cluster framework: XGBoost releases the GIL during training, so a simple thread pool dispatches
-# MAGIC one training per GPU (`device="cuda:<i>"`) and they run truly concurrently.
-# MAGIC
-# MAGIC ### Choosing the GPU tier — single A10 (default) vs 8×H100
-# MAGIC This dataset is **small for a GPU** (~581k×54; a trial finishes in seconds), so an H100 is
-# MAGIC under-utilized and its per-trial edge over an A10 is modest — while it costs several× more per
-# MAGIC GPU-hour. And because each trial takes **seconds** but GPU **startup takes minutes**, the
-# MAGIC startup dominates: one A10 running all trials sequentially is usually the **cheapest and
-# MAGIC simplest** choice here. So this sample **defaults to a single `GPU_1xA10`**.
-# MAGIC
-# MAGIC Scale up only when it pays off — for **larger/longer trials**, attach a **`GPU_8xH100`** node
-# MAGIC and the same code fans the trials 8-way (one per GPU). Each trial's time is printed below;
-# MAGIC turn it into cost with the current
-# MAGIC [serverless GPU pricing](https://www.databricks.com/product/pricing) (`time × per-accelerator
-# MAGIC rate`) rather than a hardcoded figure. (Data-parallel single-model training — `xgboost.dask` +
-# MAGIC Dask-CUDA — is a different, niche mode for data too large for one GPU; on AIR it needs a custom
-# MAGIC RAPIDS image.)
+"""XGBoost HPO worker (single GPU_1xA10) — AI Runtime CLI script.
 
-# COMMAND ----------
+Runs a **shard** of the hyperparameter search on one A10 (a slice of the same seeded grid, selected
+by TRIAL_START/NUM_TRIALS), then registers the best model of that shard. Trials run concurrently via
+a ThreadPoolExecutor (XGBoost releases the GIL) over whatever GPUs are attached — on a single A10
+that means sequential, which is exactly what we want per worker.
 
-# MAGIC %md
-# MAGIC ## ▶ Before you start — attach a serverless GPU
-# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook **defaults to
-# MAGIC a single `GPU_1xA10`** (trials run sequentially — cheapest for this dataset). Attach one:
-# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
-# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
-# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
-# MAGIC 4. Click **Apply**, then **Confirm**.
-# MAGIC
-# MAGIC **To parallelize (larger/longer trials):** attach **`GPU_8xH100`** instead — the same code runs
-# MAGIC one trial per GPU, 8-way.
-# MAGIC
-# MAGIC Then **run the cells one at a time, top to bottom**, reviewing each step's output. (Run All works too, but stepping through is recommended for a sample you're evaluating.)
-# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
-# MAGIC
-# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/02_train_multigpu.py` — run
-# MAGIC > it with `air run --file 02_cli/train_multigpu.yaml --watch`.
+This is the per-job worker that `02_cli/fanout_hpo.py` fans out across N cheap single-A10 jobs; you
+can also run it standalone for a single-node search:
+    COPYFILE_DISABLE=1 air run --file 02_cli/hpo_worker.yaml --watch --profile <your-profile>
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Install dependencies
-# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
-# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
-# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
-# MAGIC from the workload YAML instead.)
-
-# COMMAND ----------
-
-# MAGIC %pip install "xgboost>=2.1" "scikit-learn>=1.3"
-
-# COMMAND ----------
-
-# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
-# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
-# MAGIC %restart_python
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Configuration
-# MAGIC Env-var-driven config (the same dataset knobs as `01`, plus `NUM_TRIALS`). Set an env var
-# MAGIC before running, or edit the `Config` cell.
-
-# COMMAND ----------
+There is no notebook equivalent — scaling HPO across nodes is a control-plane task (see fanout_hpo.py).
+"""
 
 import os
 import logging
@@ -97,15 +30,6 @@ logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 # Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
 logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
 logging.getLogger("py4j").setLevel(logging.ERROR)
-
-
-# Notebook widget for the UC catalog/schema — set a catalog where you can CREATE schemas/volumes/
-# models (`main` is often locked down in governed workspaces). Runs before Config reads the env.
-# Notebook-only; the CLI copy takes these from the workload YAML / env instead.
-dbutils.widgets.text("UC_CATALOG", "main", "Unity Catalog (must have CREATE)")
-dbutils.widgets.text("UC_SCHEMA", "air_samples", "Schema")
-os.environ["UC_CATALOG"] = dbutils.widgets.get("UC_CATALOG")
-os.environ["UC_SCHEMA"] = dbutils.widgets.get("UC_SCHEMA")
 
 
 def _env(name: str, default: str) -> str:
@@ -144,7 +68,7 @@ def _ensure_uc(catalog, schema, volume=None):
 @dataclass
 class Config:
     gpu_type: str = _env("GPU_TYPE", "H100")
-    # Number of hyperparameter trials. Defaults to 2× the GPU count so every GPU does real work.
+    # Number of hyperparameter trials. Defaults to 2x the GPU count so every GPU does real work.
     num_trials: int = int(_env("NUM_TRIALS", "16"))
 
     # Fan-out sharding (used by the A10 fan-out orchestrator, fanout_hpo.py): run a slice of a
@@ -174,13 +98,6 @@ class Config:
 CFG = Config()
 print(CFG)
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Download the (shared) dataset
-# MAGIC The Forest CoverType dataset is downloaded once and shared read-only across all trials.
-
-# COMMAND ----------
 
 import numpy as np
 from sklearn.datasets import fetch_covtype
@@ -205,19 +122,6 @@ def load_dataset(cfg: Config):
     return X_train, X_test, y_train, y_test
 
 
-# Run it: download once; all trials share this split.
-X_train, X_test, y_train, y_test = load_dataset(CFG)
-data = (X_train, X_test, y_train, y_test)
-num_class = int(y_train.max()) + 1
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Sample the hyperparameter grid
-# MAGIC Draw `NUM_TRIALS` reproducible random hyperparameter combinations — one candidate per GPU.
-
-# COMMAND ----------
-
 def sample_hyperparameters(cfg: Config):
     """Random search space. Returns a list of `num_trials` parameter dicts."""
     rng = np.random.default_rng(cfg.random_state)
@@ -234,15 +138,6 @@ def sample_hyperparameters(cfg: Config):
     # This job runs its slice of the shared grid (fan-out); defaults return all num_trials.
     return grid[cfg.trial_start : cfg.trial_start + cfg.num_trials]
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 5. Train the trials in parallel — one per GPU
-# MAGIC A `ThreadPoolExecutor` with one worker per GPU dispatches trainings. Each trial sets
-# MAGIC `device="cuda:<gpu>"`; XGBoost releases the GIL during `train`, so the trials run concurrently
-# MAGIC on distinct GPUs. Falls back to CPU when no GPU is present (threads still parallelize).
-
-# COMMAND ----------
 
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -308,21 +203,6 @@ def run_hpo(cfg: Config, data, num_class):
     return results, wall, n_gpu
 
 
-# Run it: train all trials, one per GPU, concurrently.
-import torch
-
-print(f"CUDA available: {torch.cuda.is_available()} | GPUs: {torch.cuda.device_count()}")
-results, wall, n_gpu = run_hpo(CFG, data, num_class)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Log all trials to MLflow & register the best model to Unity Catalog
-# MAGIC Every trial is logged as a nested MLflow run for side-by-side comparison; the best booster
-# MAGIC (by validation AUC) is registered to Unity Catalog and promoted to the **`@champion`** alias.
-
-# COMMAND ----------
-
 import mlflow
 
 
@@ -334,7 +214,7 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
     best = results[0]
 
     nested = mlflow.active_run() is not None
-    with mlflow.start_run(run_name="xgboost-hpo-multigpu", nested=nested) as run:
+    with mlflow.start_run(run_name="xgboost-hpo", nested=nested) as run:
         mlflow.log_params({
             "dataset": "sklearn.fetch_covtype",
             "num_trials": cfg.num_trials,
@@ -389,6 +269,18 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
         return run.info.run_id
 
 
-# Run it: log every trial and register the best model as @champion.
-run_id = log_and_register(CFG, results, wall, n_gpu, X_train[:5])
-print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")
+def main():
+    import torch
+
+    print(f"CUDA available: {torch.cuda.is_available()} | GPUs: {torch.cuda.device_count()}")
+    X_train, X_test, y_train, y_test = load_dataset(CFG)
+    data = (X_train, X_test, y_train, y_test)
+    num_class = int(y_train.max()) + 1
+    results, wall, n_gpu = run_hpo(CFG, data, num_class)
+    run_id = log_and_register(CFG, results, wall, n_gpu, X_train[:5])
+    print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")
+    return results[0]
+
+
+if __name__ == "__main__":
+    main()

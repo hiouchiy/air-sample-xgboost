@@ -127,7 +127,7 @@ def latest_version(cfg: Config) -> str:
     client = MlflowClient()
     versions = client.search_model_versions(f"name='{cfg.uc_model_fqn}'")
     if not versions:
-        raise RuntimeError(f"No versions found for {cfg.uc_model_fqn}. Run 01/02 first.")
+        raise RuntimeError(f"No versions found for {cfg.uc_model_fqn}. Run 01 (or the fan-out HPO) first.")
     return str(max(int(v.version) for v in versions))
 
 

@@ -1,14 +1,16 @@
-"""XGBoost HPO — A10 fan-out orchestrator (control-plane).
+"""XGBoost HPO — A10 fan-out orchestrator (control-plane). Optional scale-out alternative to the
+single-GPU training in step 1: it searches hyperparameters and registers the best model.
 
-Runs the hyperparameter search as **N parallel single-`GPU_1xA10` jobs** instead of one
-`GPU_8xH100` node: it shards the trial grid across N `air run` submissions (each a slice of the same
-seeded grid), waits for them, then promotes the **global best** to the `@champion` alias.
+Runs the hyperparameter search as **N parallel single-`GPU_1xA10` jobs**: it shards the trial grid
+across N `air run` submissions (each a slice of the same seeded grid), waits for them, then promotes
+the **global best** to the `@champion` alias.
 
-When is this worth it? HPO is embarrassingly parallel, and for a small dataset a single A10 is much
-cheaper per GPU-hour than an H100. Fan-out buys wall-clock parallelism at A10 cost — a middle ground
-between "one A10, trials sequential" (cheapest; the default of 02_train_multigpu.py) and "one
-GPU_8xH100 node" (simplest 8-way parallel, but pricier). At tiny scale the per-job cold start can
-outweigh the savings, so measure before choosing; this shines when trials are longer / more numerous.
+Why this shape for classic ML? HPO is embarrassingly parallel, so the realistic, cost-appropriate
+way to scale it is to spread trials across many **cheap** A10 nodes — not to reach for a
+`GPU_8xH100` box that a seconds-long XGBoost fit can't justify. Fan-out buys wall-clock parallelism
+at A10 cost. At tiny scale the per-job cold start can outweigh the savings, so measure before
+choosing; this shines when trials are longer / more numerous. (Contrast with the BERT sample, where
+8-GPU DDP is genuine distributed training — different workload, different scaling strategy.)
 
 This is a **control-plane** script (it only shells out to the `air` and `databricks` CLIs) — it needs
 **no GPU** and **no extra Python deps** (not even mlflow), and does NOT run on AI Runtime itself. Run
@@ -18,7 +20,7 @@ it locally with your profile, from the repo root:
 
 Each worker registers a model version and writes a small result JSON (version + best AUC) to the
 `predictions` UC Volume; this script reads them, picks the global best, and sets `@champion` to that
-version via `databricks registered-models set-alias`. 03_batch_inference.py then loads `@champion`.
+version via `databricks registered-models set-alias`. 02_batch_inference.py then loads `@champion`.
 """
 
 import argparse
@@ -50,9 +52,9 @@ def _run_worker(worker_idx, trial_start, trial_count, trial_total, fanout_tag, p
     command = (
         f"{passthrough} TRIAL_TOTAL={trial_total} TRIAL_START={trial_start} NUM_TRIALS={trial_count} "
         f"FANOUT_TAG={fanout_tag} REGISTER_MODEL=true "
-        f"python $CODE_SOURCE_PATH/02_cli/02_train_multigpu.py"
+        f"python $CODE_SOURCE_PATH/02_cli/hpo_worker.py"
     ).strip()
-    argv = ["air", "run", "--file", "02_cli/train_multigpu.yaml", "--watch",
+    argv = ["air", "run", "--file", "02_cli/hpo_worker.yaml", "--watch",
             "--override", f"command={command}"]
     if profile:
         argv += ["--profile", profile]

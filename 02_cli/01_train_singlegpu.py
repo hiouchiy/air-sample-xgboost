@@ -112,7 +112,7 @@ def load_dataset(cfg: Config):
     """Download the Forest CoverType dataset and split it into train/test.
 
     The source labels are 1..7; XGBoost multi-class expects 0..6, so we shift them by one. The
-    split is deterministic (fixed test_size + random_state), so batch inference (03) regenerates
+    split is deterministic (fixed test_size + random_state), so batch inference (02) regenerates
     the identical held-out split.
     """
     print("Downloading Forest CoverType (~11 MB, cached under ~/scikit-learn_data)...")
@@ -247,7 +247,7 @@ def log_and_register(cfg: Config, booster, num_class, metrics, X_train, evals_re
 
 def _promote_to_champion(cfg: Config, model_info):
     """Tag the just-registered version with the @champion alias — this is what batch inference
-    (03) loads by default, so version promotion is explicit and governed."""
+    (02) loads by default, so version promotion is explicit and governed."""
     from mlflow.tracking import MlflowClient
 
     version = model_info.registered_model_version

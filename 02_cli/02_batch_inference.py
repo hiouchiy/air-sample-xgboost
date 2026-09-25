@@ -1,64 +1,10 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC # XGBoost — GPU batch inference on AI Runtime
-# MAGIC
-# MAGIC Loads the trained XGBoost model that `01` or `02` registered to **Unity Catalog**
-# MAGIC (the `@champion` version) and runs **GPU batch inference** over the held-out test set on an
-# MAGIC AI Runtime GPU. It reports accuracy and throughput and writes the scored rows to a CSV on a
-# MAGIC **Unity Catalog Volume** (a plain file write — no Spark).
+"""XGBoost GPU batch inference on Forest CoverType — AI Runtime CLI script.
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## ▶ Before you start — attach a serverless GPU
-# MAGIC AI Runtime GPUs are **serverless** — there is no cluster to create. This notebook needs a
-# MAGIC **single-GPU `GPU_1xA10`**. Attach one from the notebook itself:
-# MAGIC 1. Open the **compute** drop-down at the top of the notebook → **Serverless GPU**.
-# MAGIC 2. Click the **environment** icon to open the **Environment** side panel.
-# MAGIC 3. Set **Accelerator** to a **single A10** (`GPU_1xA10`); leave the default **Base environment**.
-# MAGIC 4. Click **Apply**, then **Confirm**.
-# MAGIC
-# MAGIC Run `01` (or `02`) first — it registers the model and sets the `@champion` alias this step
-# MAGIC loads — then **run the cells one at a time, top to bottom**, reviewing each step's output. (Run All works too, but stepping through is recommended for a sample you're evaluating.)
-# MAGIC Docs: [Connect to serverless GPU compute](https://docs.databricks.com/aws/en/machine-learning/ai-runtime/connecting#gpu-compute).
-# MAGIC
-# MAGIC > Prefer submitting from a terminal? The CLI equivalent is `02_cli/03_batch_inference.py` — run
-# MAGIC > it with `air run --file 02_cli/batch_inference.yaml --watch`.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 1. Install dependencies
-# MAGIC The `%pip` cell installs the dependencies. **`%restart_python`** (a Databricks magic) then
-# MAGIC restarts the notebook's Python process so those freshly installed versions are the ones
-# MAGIC imported below — run both once, at the top. (The CLI copy in `02_cli/` gets its dependencies
-# MAGIC from the workload YAML instead.)
-
-# COMMAND ----------
-
-# MAGIC %pip install "xgboost>=2.1" "scikit-learn>=1.3"
-
-# COMMAND ----------
-
-# MAGIC # Restarts the Python interpreter so the versions just installed above are the ones imported
-# MAGIC # below. Databricks-specific magic; it clears in-memory state, so continue from the next cell.
-# MAGIC %restart_python
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 2. Configuration
-# MAGIC By default we load the registered UC model's **`@champion`** alias and score the held-out
-# MAGIC test split. Keep `TEST_SIZE`/`RANDOM_STATE` equal to the training run so we regenerate the
-# MAGIC identical split. Point `MODEL_URI` at a specific version or alias to score a different model.
-# MAGIC
-# MAGIC This step loads the **`@champion`** version of `<catalog>.<schema>.xgboost_classification`.
-# MAGIC Both `01` (single-GPU) and `02` (multi-GPU HPO) set `@champion` to the model they just
-# MAGIC trained, so **03 scores whichever you ran last**. To score a specific model: re-run `01` or
-# MAGIC `02` (it re-promotes `@champion`), or set `MODEL_URI` to a version/alias, e.g.
-# MAGIC `models:/<catalog>.<schema>.xgboost_classification/3` (empty `MODEL_URI` = `@champion`).
-
-# COMMAND ----------
+Loads the @champion model from Unity Catalog, scores the held-out test split on the GPU, and writes
+predictions as a CSV to a UC Volume. Requires a model registered by 01 (or the fan-out HPO) first.
+    COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile <your-profile>
+The notebook equivalent is 01_notebook/02_batch_inference.py.
+"""
 
 import os
 import logging
@@ -72,15 +18,6 @@ logging.getLogger("mlflow.tracking.context.registry").setLevel(logging.ERROR)
 # Serverless also emits benign pyspark-connect / py4j chatter during MLflow logging; quiet it too.
 logging.getLogger("pyspark.sql.connect").setLevel(logging.ERROR)
 logging.getLogger("py4j").setLevel(logging.ERROR)
-
-
-# Notebook widget for the UC catalog/schema — set a catalog where you can CREATE schemas/volumes/
-# models (`main` is often locked down in governed workspaces). Runs before Config reads the env.
-# Notebook-only; the CLI copy takes these from the workload YAML / env instead.
-dbutils.widgets.text("UC_CATALOG", "main", "Unity Catalog (must have CREATE)")
-dbutils.widgets.text("UC_SCHEMA", "air_samples", "Schema")
-os.environ["UC_CATALOG"] = dbutils.widgets.get("UC_CATALOG")
-os.environ["UC_SCHEMA"] = dbutils.widgets.get("UC_SCHEMA")
 
 
 def _env(name: str, default: str) -> str:
@@ -126,7 +63,7 @@ class Config:
 
     # Test data ---------------------------------------------------------
     # We re-download Forest CoverType and take the SAME held-out test split as training. Because the
-    # split is deterministic (identical TEST_SIZE + RANDOM_STATE, matching 01/02), the model scores
+    # split is deterministic (identical TEST_SIZE + RANDOM_STATE, matching the training run), it scores
     # exactly the rows it did not train on — keep these values equal to the training run.
     test_size: float = float(_env("TEST_SIZE", "0.2"))
     max_samples: int = int(_env("MAX_SAMPLES", "-1"))
@@ -147,13 +84,6 @@ class Config:
 CFG = Config()
 print(CFG)
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Load the model from Unity Catalog onto the GPU
-# MAGIC We first try the `@champion` alias; if it is not set we fall back to the latest version.
-
-# COMMAND ----------
 
 import mlflow
 import torch
@@ -173,7 +103,7 @@ def load_model(cfg: Config):
         client = MlflowClient()
         versions = client.search_model_versions(f"name='{cfg.uc_model_fqn}'")
         if not versions:
-            raise RuntimeError(f"No versions for {cfg.uc_model_fqn}; run 01/02 first.")
+            raise RuntimeError(f"No versions for {cfg.uc_model_fqn}; run 01 (or the fan-out HPO) first.")
         latest = max(int(v.version) for v in versions)
         uri = f"models:/{cfg.uc_model_fqn}/{latest}"
         print(f"Loading {uri}")
@@ -185,22 +115,10 @@ def load_model(cfg: Config):
     return booster, uri
 
 
-# Run it: load the @champion model onto the GPU.
-print(f"CUDA available: {torch.cuda.is_available()}")
-booster, uri = load_model(CFG)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Load input rows — the held-out test split
-# MAGIC We re-download Forest CoverType and take the identical held-out split the model never trained
-# MAGIC on. For real scoring, replace this cell with your own rows loaded from a UC table.
-
-# COMMAND ----------
-
 import numpy as np
 from sklearn.datasets import fetch_covtype
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
 
 def load_inputs(cfg: Config):
@@ -222,21 +140,8 @@ def load_inputs(cfg: Config):
     return X_test, y_test
 
 
-# Run it.
-X_test, y_test = load_inputs(CFG)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 5. Run GPU batch inference
-# MAGIC Score the held-out rows on the GPU and log latency/throughput (and accuracy vs. the true
-# MAGIC labels) to an MLflow run.
-
-# COMMAND ----------
-
 import time
 import xgboost as xgb
-from sklearn.metrics import accuracy_score
 
 
 def run_inference(booster, X_test):
@@ -252,26 +157,6 @@ def run_inference(booster, X_test):
 
     return proba, elapsed, throughput
 
-
-# Run it: score inside an MLflow run and log metrics.
-nested = mlflow.active_run() is not None
-with mlflow.start_run(run_name="xgboost-classification-batch-inference", nested=nested):
-    proba, elapsed, throughput = run_inference(booster, X_test)
-    mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(X_test)})
-    mlflow.log_metric("inference_seconds", elapsed)
-    mlflow.log_metric("rows_per_second", throughput)
-    if y_test is not None:
-        acc = accuracy_score(y_test, np.argmax(proba, axis=1))
-        mlflow.log_metric("accuracy", acc)
-        print(f"Batch inference accuracy: {acc:.4f}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Write predictions to a Unity Catalog Volume
-# MAGIC A plain file write to the UC Volume — no Spark involved.
-
-# COMMAND ----------
 
 def persist(cfg: Config, proba, y_test):
     import pandas as pd
@@ -292,6 +177,31 @@ def persist(cfg: Config, proba, y_test):
     return path
 
 
-# Run it.
-target = persist(CFG, proba, y_test)
-print("Output:", target)
+def main():
+
+    mlflow.set_registry_uri("databricks-uc")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    booster, uri = load_model(CFG)
+    X_test, y_test = load_inputs(CFG)
+
+    nested = mlflow.active_run() is not None
+    with mlflow.start_run(run_name="xgboost-classification-batch-inference", nested=nested):
+        proba, elapsed, throughput = run_inference(booster, X_test)
+        mlflow.log_params({"model_uri": uri, "batch_size": CFG.batch_size, "n_rows": len(X_test)})
+        mlflow.log_metric("inference_seconds", elapsed)
+        mlflow.log_metric("rows_per_second", throughput)
+
+        if y_test is not None:
+            acc = accuracy_score(y_test, np.argmax(proba, axis=1))
+            mlflow.log_metric("accuracy", acc)
+            print(f"Batch inference accuracy: {acc:.4f}")
+
+        target = persist(CFG, proba, y_test)
+        print(f"Output: {target}")
+
+
+if __name__ == "__main__":
+    main()
