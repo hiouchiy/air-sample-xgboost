@@ -13,15 +13,24 @@ choosing; this shines when trials are longer / more numerous. (Contrast with the
 8-GPU DDP is genuine distributed training — different workload, different scaling strategy.)
 
 This is a **control-plane** script (it only shells out to the `air` and `databricks` CLIs) — it needs
-**no GPU** and **no extra Python deps** (not even mlflow), and does NOT run on AI Runtime itself. Run
-it locally with your profile, from the repo root:
+**no GPU** and **no extra Python deps** (not even mlflow; stdlib only), and does NOT run on AI Runtime
+itself. Run it locally with your profile, from the repo root. Use `uv run` (installed in Setup): it
+picks a Python for you, so you don't need a `python` on PATH, and the inline metadata below makes the
+run self-contained:
 
-    NUM_WORKERS=2 TRIAL_TOTAL=8 python 02_cli/fanout_hpo.py --profile <profile>
+    NUM_WORKERS=2 TRIAL_TOTAL=8 uv run 02_cli/fanout_hpo.py --profile <profile>
+
+(Plain `python 02_cli/fanout_hpo.py` also works — it's stdlib only.)
 
 Each worker registers a model version and writes a small result JSON (version + best AUC) to the
 `predictions` UC Volume; this script reads them, picks the global best, and sets `@champion` to that
 version via `databricks registered-models set-alias`. 02_batch_inference.py then loads `@champion`.
 """
+
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []   # stdlib only — this orchestrator just shells out to the `air`/`databricks` CLIs
+# ///
 
 import argparse
 import logging

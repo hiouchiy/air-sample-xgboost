@@ -144,7 +144,7 @@ COPYFILE_DISABLE=1 air run --file 02_cli/train_singlegpu.yaml --watch --profile 
 #    OPTIONAL scale-out (alternative to step 1): search hyperparameters across N cheap single-A10
 #    jobs (fan-out), then promote the global best to @champion. Control-plane orchestrator — runs
 #    locally, needs no GPU and no mlflow; it submits N `air run` jobs of 02_cli/hpo_worker.py.
-NUM_WORKERS=2 TRIAL_TOTAL=8 python 02_cli/fanout_hpo.py --profile air
+NUM_WORKERS=2 TRIAL_TOTAL=8 uv run 02_cli/fanout_hpo.py --profile air   # uv (from Setup) picks a Python; plain `python` works too (stdlib only)
 
 # 2) GPU batch inference over the held-out test set → predictions CSV on the UC Volume
 COPYFILE_DISABLE=1 air run --file 02_cli/batch_inference.yaml --watch --profile air
