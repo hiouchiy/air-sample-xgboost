@@ -140,7 +140,7 @@ def sample_hyperparameters(cfg: Config):
 
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score, accuracy_score
@@ -172,71 +172,90 @@ def _train_one_trial(trial_idx, params, gpu_id, cfg, data, num_class, use_gpu):
             "auc": auc, "accuracy": acc, "train_seconds": train_time, "booster": booster}
 
 
-def run_hpo(cfg: Config, data, num_class):
+import mlflow
+
+
+def run_hpo_and_log(cfg: Config, data, num_class, X_sample):
+    """Open ONE MLflow run, log the config UP FRONT, then run this shard's trials — logging EACH
+    trial as a child run the moment it finishes (so the run fills in live, the way 01 streams its
+    per-round metrics) — and finally log the summary metrics and register the best model.
+
+    Trials run on worker threads (XGBoost releases the GIL); every MLflow write happens here on the
+    main thread via the client API, so the streamed child runs never fight over the fluent run."""
     import torch
+    from mlflow.models.signature import infer_signature
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_registry_uri("databricks-uc")
+    _ensure_uc(cfg.uc_catalog, cfg.uc_schema)
 
     n_gpu = torch.cuda.device_count()
     use_gpu = n_gpu > 0
     workers = n_gpu if use_gpu else min(cfg.num_trials, os.cpu_count() or 4)
+    trials = sample_hyperparameters(cfg)
     print(f"Running {cfg.num_trials} trials across {workers} "
           f"{'GPU' if use_gpu else 'CPU'} worker(s)...")
-    trials = sample_hyperparameters(cfg)
-
-    t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_train_one_trial, i, p, (i % n_gpu if use_gpu else 0),
-                        cfg, data, num_class, use_gpu): i
-            for i, p in enumerate(trials, cfg.trial_start)
-        }
-        for fut, i in futures.items():
-            try:
-                results.append(fut.result())
-            except Exception as exc:  # isolate trials: one bad trial must not discard the rest
-                print(f"[trial {i:02d}] FAILED: {exc}")
-    wall = time.time() - t0
-    if not results:
-        raise RuntimeError("All HPO trials failed - see the per-trial errors above.")
-    print(f"HPO: {len(results)}/{cfg.num_trials} trials succeeded in {wall:.1f}s")
-    results.sort(key=lambda r: r["auc"], reverse=True)
-    return results, wall, n_gpu
-
-
-import mlflow
-
-
-def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
-    from mlflow.models.signature import infer_signature
-
-    mlflow.set_registry_uri("databricks-uc")
-    _ensure_uc(cfg.uc_catalog, cfg.uc_schema)
-    best = results[0]
 
     nested = mlflow.active_run() is not None
     with mlflow.start_run(run_name="xgboost-hpo", nested=nested) as run:
+        client = MlflowClient()
+        exp_id, parent_id = run.info.experiment_id, run.info.run_id
+        # Log the config UP FRONT so the run has content immediately — not only when it finishes.
         mlflow.log_params({
             "dataset": "sklearn.fetch_covtype",
             "num_trials": cfg.num_trials,
+            "trial_start": cfg.trial_start,
             "num_gpus": n_gpu,
             "n_estimators": cfg.n_estimators,
-            "training_mode": f"parallel-hpo-{n_gpu}gpu",
+            "training_mode": f"hpo-{n_gpu}gpu" if use_gpu else "hpo-cpu",
+            "fanout_tag": cfg.fanout_tag or "(none)",
         })
+
+        results = []
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_train_one_trial, i, p, (i % n_gpu if use_gpu else 0),
+                            cfg, data, num_class, use_gpu): i
+                for i, p in enumerate(trials, cfg.trial_start)
+            }
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    r = fut.result()
+                except Exception as exc:  # isolate trials: one bad trial must not discard the rest
+                    print(f"[trial {i:02d}] FAILED: {exc}")
+                    continue
+                results.append(r)
+                # Stream this finished trial into MLflow right away as a child run. The client API is
+                # thread-safe and doesn't touch the fluent active run, so children show up live.
+                child = client.create_run(
+                    experiment_id=exp_id,
+                    tags={"mlflow.parentRunId": parent_id, "mlflow.runName": f"trial-{r['trial']:02d}"},
+                )
+                for k, v in {**r["params"], "gpu": r["gpu"]}.items():
+                    client.log_param(child.info.run_id, k, v)
+                for k, v in {"auc": r["auc"], "accuracy": r["accuracy"],
+                             "train_seconds": r["train_seconds"]}.items():
+                    client.log_metric(child.info.run_id, k, v)
+                client.set_terminated(child.info.run_id)
+        wall = time.time() - t0
+        if not results:
+            raise RuntimeError("All HPO trials failed - see the per-trial errors above.")
+        print(f"HPO: {len(results)}/{cfg.num_trials} trials succeeded in {wall:.1f}s")
+        results.sort(key=lambda r: r["auc"], reverse=True)
+        best = results[0]
+
         mlflow.log_metrics({
             "hpo_wall_seconds": wall,
             "best_auc": best["auc"],
             "best_accuracy": best["accuracy"],
         })
-        # Log every trial as a child run for comparison in the MLflow UI.
-        for r in results:
-            with mlflow.start_run(run_name=f"trial-{r['trial']:02d}", nested=True):
-                mlflow.log_params({**r["params"], "gpu": r["gpu"]})
-                mlflow.log_metrics({"auc": r["auc"], "accuracy": r["accuracy"],
-                                    "train_seconds": r["train_seconds"]})
-        # Register the best booster.
+
+        # Register the best booster. Use real rows (like 01) so the logged signature/input example
+        # match production inputs.
         booster = best["booster"]
         booster.set_param({"device": "cpu"})  # portable artifact; serving/infer can re-set cuda.
-        # Use real rows (like 01) so the logged signature/input example match production inputs.
         example = X_sample.astype(np.float32)
         output = booster.predict(xgb.DMatrix(example))
         signature = infer_signature(model_input=example, model_output=output)
@@ -261,12 +280,10 @@ def log_and_register(cfg: Config, results, wall, n_gpu, X_sample):
                 print(f"Fan-out worker: registered v{v} (auc={best['auc']:.4f}); wrote {path}. "
                       f"@champion promotion is deferred to the orchestrator.")
             else:
-                from mlflow.tracking import MlflowClient
-
-                MlflowClient().set_registered_model_alias(cfg.uc_model_fqn, "champion", v)
+                client.set_registered_model_alias(cfg.uc_model_fqn, "champion", v)
                 print(f"Registered {cfg.uc_model_fqn} version {v} and set alias @champion "
-                      f"(this is the version 03 will load).")
-        return run.info.run_id
+                      f"(this is the version 02 batch inference will load).")
+        return run.info.run_id, best
 
 
 def main():
@@ -276,10 +293,9 @@ def main():
     X_train, X_test, y_train, y_test = load_dataset(CFG)
     data = (X_train, X_test, y_train, y_test)
     num_class = int(y_train.max()) + 1
-    results, wall, n_gpu = run_hpo(CFG, data, num_class)
-    run_id = log_and_register(CFG, results, wall, n_gpu, X_train[:5])
-    print(f"Done. Best AUC={results[0]['auc']:.4f}. MLflow run_id={run_id}")
-    return results[0]
+    run_id, best = run_hpo_and_log(CFG, data, num_class, X_train[:5])
+    print(f"Done. Best AUC={best['auc']:.4f}. MLflow run_id={run_id}")
+    return best
 
 
 if __name__ == "__main__":
